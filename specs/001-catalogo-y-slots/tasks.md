@@ -11,7 +11,7 @@
 
 ## Fase 2: Fundacional
 - [x] T005 Test: validaciones de `Request` (endpoint en allowlist, body JSON ≤ 256 KB, provider no vacío) → `internal/domain/request_test.go`
-- [ ] T006 Implementar `Request` + errores de dominio tipados → `internal/domain/request.go`
+- [x] T006 Implementar `Request` + errores de dominio tipados → `internal/domain/request.go`
 
 ## Fase 3: US1 — Slot por registro (P1) 🎯 MVP
 - [ ] T007 [US1] Test de propiedad: `Assign` es determinístico → `internal/domain/slot_test.go`
