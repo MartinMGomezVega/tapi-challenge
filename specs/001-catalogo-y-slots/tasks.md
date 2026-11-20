@@ -7,7 +7,7 @@
 - [x] T001 Inicializar módulo Go (`go mod init github.com/<user>/tapi-scheduler`), layout `cmd/ internal/ test/`
 - [x] T002 [P] Configurar `golangci-lint`, `staticcheck`, `govulncheck`, `Makefile` (`make test`, `make lint`, `make it`)
 - [x] T003 [P] `docker-compose.yml` con LocalStack (DynamoDB, SQS, S3) + script de creación de tablas
-- [ ] T004 [P] Helper de testcontainers-go para LocalStack en `test/testenv/`
+- [x] T004 [P] Helper de testcontainers-go para LocalStack en `test/testenv/`
 
 ## Fase 2: Fundacional
 - [ ] T005 Test: validaciones de `Request` (endpoint en allowlist, body JSON ≤ 256 KB, provider no vacío) → `internal/domain/request_test.go`
