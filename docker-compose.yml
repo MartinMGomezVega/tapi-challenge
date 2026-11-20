@@ -1,0 +1,38 @@
+services:
+  localstack:
+    image: localstack/localstack:4.0.3
+    container_name: tapi-localstack
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=dynamodb,sqs,s3
+      - DEFAULT_REGION=us-east-1
+      - AWS_DEFAULT_REGION=us-east-1
+      - PERSISTENCE=0
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:4566/_localstack/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  init:
+    image: amazon/aws-cli:2.22.0
+    container_name: tapi-init
+    depends_on:
+      localstack:
+        condition: service_healthy
+    environment:
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-east-1
+      - AWS_ENDPOINT_URL=http://localstack:4566
+    volumes:
+      - ./scripts/localstack-init.sh:/scripts/localstack-init.sh:ro
+    entrypoint: ["/bin/sh", "/scripts/localstack-init.sh"]
+
+  # Services to be wired in M1/M2 (features 001-US2, 002, 003):
+  # - mockapi    (feature 003)
+  # - dispatcher (feature 002)
+  # - worker     (feature 003)
+  # - seed       (feature 001-US2)
