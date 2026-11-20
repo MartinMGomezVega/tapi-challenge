@@ -3,9 +3,9 @@
 **Input**: [spec.md](./spec.md), [plan.md](./plan.md)
 
 ## Fase 1: US1 — Entorno local (P1) 🎯
-- [ ] T001 [US1] `docker-compose.yml` (localstack, init, mockapi, dispatcher, worker, seed)
-- [ ] T002 [US1] Script `init` idempotente: tablas, GSIs, FIFO + DLQ, bucket
-- [ ] T003 [US1] Reloj acelerado (`CLOCK_SPEEDUP`) en el adaptador de `Clock` con test
+- [x] T001 [US1] `docker-compose.yml` (localstack, init, mockapi, dispatcher, worker, seed)
+- [x] T002 [US1] Script `init` idempotente: tablas, GSIs, FIFO + DLQ, bucket
+- [x] T003 [US1] Reloj acelerado (`CLOCK_SPEEDUP`) en el adaptador de `Clock` con test
 - [ ] T004 [US1] `make up`, `make demo` (seed 10k → simula 1 día → imprime cobertura y `max_inflight`)
 - [ ] T005 [P] [US1] README "Quick start" verificado en una máquina limpia (SC-001)
 
