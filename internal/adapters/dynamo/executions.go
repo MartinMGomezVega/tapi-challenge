@@ -412,6 +412,96 @@ func (r *ExecutionsRepo) ResetForRedrive(ctx context.Context, reqID string, date
 	return nil
 }
 
+// BatchGet loads up to N execution snapshots for date using DynamoDB BatchGetItem in chunks of 100 (005 FR-002).
+func (r *ExecutionsRepo) BatchGet(ctx context.Context, reqIDs []string, date domain.RunDate) (map[string]domain.ExecutionSnapshot, error) {
+	result := make(map[string]domain.ExecutionSnapshot, len(reqIDs))
+	const maxChunk = 100
+
+	for start := 0; start < len(reqIDs); start += maxChunk {
+		end := min(start+maxChunk, len(reqIDs))
+		keys := make([]map[string]types.AttributeValue, 0, end-start)
+		for _, id := range reqIDs[start:end] {
+			keys = append(keys, execKeyMap(id, date))
+		}
+
+		pending := map[string]types.KeysAndAttributes{
+			r.tableName: {Keys: keys},
+		}
+		for attempt := 0; len(pending) > 0; attempt++ {
+			out, err := r.client.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{
+				RequestItems: pending,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("batch get executions (%s): %w", date, err)
+			}
+			for _, raw := range out.Responses[r.tableName] {
+				var item executionItem
+				if err := attributevalue.UnmarshalMap(raw, &item); err != nil {
+					return nil, fmt.Errorf("unmarshal batch get execution: %w", err)
+				}
+				createdAt, _ := time.Parse(time.RFC3339Nano, item.CreatedAt)
+				updatedAt, _ := time.Parse(time.RFC3339Nano, item.UpdatedAt)
+				result[item.RequestID] = domain.ExecutionSnapshot{
+					RequestID:  item.RequestID,
+					Status:     domain.ExecutionStatus(item.Status),
+					ErrorClass: item.ErrorClass,
+					CreatedAt:  createdAt.UTC(),
+					UpdatedAt:  updatedAt.UTC(),
+				}
+			}
+			pending = out.UnprocessedKeys
+			if len(pending) > 0 && attempt >= 5 {
+				return nil, fmt.Errorf("batch get executions exceeded retries with %d unprocessed keys", len(pending[r.tableName].Keys))
+			}
+		}
+	}
+	return result, nil
+}
+
+// ResetStale conditionally resets a non-terminal execution whose updated_at <= staleBefore back to ENQUEUED (005 FR-003).
+func (r *ExecutionsRepo) ResetStale(
+	ctx context.Context,
+	reqID string,
+	date domain.RunDate,
+	staleBefore, now time.Time,
+) (bool, error) {
+	cutoffStr := staleBefore.UTC().Format(time.RFC3339Nano)
+	nowStr := now.UTC().Format(time.RFC3339Nano)
+	_, err := r.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:        aws.String(r.tableName),
+		Key:              execKeyMap(reqID, date),
+		UpdateExpression: aws.String("SET #status = :enqueued, #rds = :rds, #updated_at = :now REMOVE #owner, #expires"),
+		ConditionExpression: aws.String(
+			"NOT (#status IN (:succ, :fperm, :fexh, :skip)) AND #updated_at <= :cutoff",
+		),
+		ExpressionAttributeNames: map[string]string{
+			"#status":     "status",
+			"#rds":        "run_date_status",
+			"#updated_at": "updated_at",
+			"#owner":      "lease_owner",
+			"#expires":    "lease_expires_at",
+		},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":succ":     &types.AttributeValueMemberS{Value: string(domain.StatusSucceeded)},
+			":fperm":    &types.AttributeValueMemberS{Value: string(domain.StatusFailedPermanent)},
+			":fexh":     &types.AttributeValueMemberS{Value: string(domain.StatusFailedExhausted)},
+			":skip":     &types.AttributeValueMemberS{Value: string(domain.StatusSkipped)},
+			":enqueued": &types.AttributeValueMemberS{Value: string(domain.StatusEnqueued)},
+			":rds":      &types.AttributeValueMemberS{Value: string(date) + "#" + string(domain.StatusEnqueued)},
+			":cutoff":   &types.AttributeValueMemberS{Value: cutoffStr},
+			":now":      &types.AttributeValueMemberS{Value: nowStr},
+		},
+	})
+	if err == nil {
+		return true, nil
+	}
+	var condErr *types.ConditionalCheckFailedException
+	if errors.As(err, &condErr) {
+		return false, nil
+	}
+	return false, fmt.Errorf("reset stale %s#%s: %w", reqID, date, err)
+}
+
 func (r *ExecutionsRepo) updateOwned(
 	ctx context.Context,
 	key execute.ExecKey,
