@@ -22,8 +22,8 @@
 - [x] T012 [US1] Test: asignación incremental elige el minuto de menor ocupación
 - [x] T013 [US1] Implementar asignación incremental con histograma
 - [x] T014 [US1] Test de integración: `ListBySlotShard` devuelve sólo los ítems del slot, paginado → `internal/adapters/dynamo/requests_it_test.go`
-- [ ] T015 [US1] Implementar adaptador `requests` (GetItem, Query GSI, SetSlot condicional por `version`)
-- [ ] T016 [P] [US1] Benchmark `BenchmarkAssign1M` (< 2 s)
+- [x] T015 [US1] Implementar adaptador `requests` (GetItem, Query GSI, SetSlot condicional por `version`)
+- [x] T016 [P] [US1] Benchmark `BenchmarkAssign1M` (< 2 s)
 
 **Checkpoint**: slots válidos y uniformes, consultables por GSI.
 
