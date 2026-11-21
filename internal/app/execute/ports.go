@@ -84,9 +84,10 @@ type Message struct {
 
 // Response is the raw provider HTTP response returned by ProviderAPI.Call.
 type Response struct {
-	StatusCode int
-	Body       []byte
-	RetryAfter string
+	StatusCode  int
+	Body        []byte
+	RetryAfter  string
+	ErrorHeader string
 }
 
 // RetryAction is the action selected by RetryPolicy.Decide.

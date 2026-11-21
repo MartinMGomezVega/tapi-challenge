@@ -148,8 +148,9 @@ func (c *Client) Call(ctx context.Context, req domain.Request, idemKey, tracePar
 	}
 
 	return execute.Response{
-		StatusCode: resp.StatusCode,
-		Body:       respBody,
-		RetryAfter: resp.Header.Get("Retry-After"),
+		StatusCode:  resp.StatusCode,
+		Body:        respBody,
+		RetryAfter:  resp.Header.Get("Retry-After"),
+		ErrorHeader: resp.Header.Get("X-Amzn-ErrorType"),
 	}, nil
 }
