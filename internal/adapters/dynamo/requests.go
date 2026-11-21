@@ -95,6 +95,15 @@ type requestKeyItem struct {
 	CreatedAt string `dynamodbav:"created_at"`
 }
 
+type providerRequestItem struct {
+	ID       string `dynamodbav:"id"`
+	Provider string `dynamodbav:"provider"`
+	Version  int64  `dynamodbav:"version"`
+	Slot     int    `dynamodbav:"slot"`
+	Shard    int    `dynamodbav:"shard"`
+	Enabled  bool   `dynamodbav:"enabled"`
+}
+
 // Put stores a Request item in DynamoDB. Requests with Slot < 0 omit slot_shard so
 // gsi_slot_shard remains sparse until a slot is assigned.
 func (r *RequestsRepo) Put(ctx context.Context, req domain.Request) error {
@@ -189,7 +198,7 @@ func (r *RequestsRepo) ListBySlotShard(ctx context.Context, slot, shard int, pag
 		return nil, "", fmt.Errorf("%w: %d", domain.ErrInvalidShard, shard)
 	}
 
-	startKey, err := decodePageToken(page)
+	startKey, err := decodePageToken(page, "id", "slot_shard", "provider_id")
 	if err != nil {
 		return nil, "", err
 	}
@@ -298,14 +307,91 @@ func (r *RequestsRepo) SetSlot(ctx context.Context, id string, slot, shard int, 
 
 // CountByProvider returns the total number of requests registered for provider using
 // gsi_provider with Select=COUNT (no Scan, no items transferred).
-func (r *RequestsRepo) CountByProvider(_ context.Context, _ string) (int, error) {
-	return 0, errors.New("not implemented")
+func (r *RequestsRepo) CountByProvider(ctx context.Context, provider string) (int, error) {
+	if strings.TrimSpace(provider) == "" {
+		return 0, domain.ErrInvalidProvider
+	}
+
+	var (
+		total    int
+		startKey map[string]types.AttributeValue
+	)
+	for {
+		out, err := r.client.Query(ctx, &dynamodb.QueryInput{
+			TableName:              aws.String(r.tableName),
+			IndexName:              aws.String(gsiProvider),
+			KeyConditionExpression: aws.String("#provider = :provider"),
+			ExpressionAttributeNames: map[string]string{
+				"#provider": "provider",
+			},
+			ExpressionAttributeValues: map[string]types.AttributeValue{
+				":provider": &types.AttributeValueMemberS{Value: provider},
+			},
+			Select:            types.SelectCount,
+			ExclusiveStartKey: startKey,
+		})
+		if err != nil {
+			return 0, fmt.Errorf("count gsi_provider (%s): %w", provider, err)
+		}
+		total += int(out.Count)
+		if len(out.LastEvaluatedKey) == 0 {
+			return total, nil
+		}
+		startKey = out.LastEvaluatedKey
+	}
 }
 
 // ListByProvider queries gsi_provider in ascending SK=id order, returning projected
 // (id, provider, version, slot, shard, enabled) items paginated by cursor (FR-004b).
-func (r *RequestsRepo) ListByProvider(_ context.Context, _, _ string) ([]domain.ProviderRequestItem, string, error) {
-	return nil, "", errors.New("not implemented")
+func (r *RequestsRepo) ListByProvider(ctx context.Context, provider, page string) ([]domain.ProviderRequestItem, string, error) {
+	if strings.TrimSpace(provider) == "" {
+		return nil, "", domain.ErrInvalidProvider
+	}
+
+	startKey, err := decodePageToken(page, "id", "provider")
+	if err != nil {
+		return nil, "", err
+	}
+
+	out, err := r.client.Query(ctx, &dynamodb.QueryInput{
+		TableName:              aws.String(r.tableName),
+		IndexName:              aws.String(gsiProvider),
+		KeyConditionExpression: aws.String("#provider = :provider"),
+		ExpressionAttributeNames: map[string]string{
+			"#provider": "provider",
+		},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":provider": &types.AttributeValueMemberS{Value: provider},
+		},
+		ScanIndexForward:  aws.Bool(true),
+		Limit:             aws.Int32(r.pageSize),
+		ExclusiveStartKey: startKey,
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("query gsi_provider (%s): %w", provider, err)
+	}
+
+	items := make([]domain.ProviderRequestItem, 0, len(out.Items))
+	for _, raw := range out.Items {
+		var projected providerRequestItem
+		if err := attributevalue.UnmarshalMap(raw, &projected); err != nil {
+			return nil, "", fmt.Errorf("unmarshal provider request item: %w", err)
+		}
+		items = append(items, domain.ProviderRequestItem{
+			ID:       projected.ID,
+			Provider: projected.Provider,
+			Version:  projected.Version,
+			Slot:     projected.Slot,
+			Shard:    projected.Shard,
+			Enabled:  projected.Enabled,
+		})
+	}
+
+	nextPage, err := encodePageToken(out.LastEvaluatedKey)
+	if err != nil {
+		return nil, "", err
+	}
+	return items, nextPage, nil
 }
 
 func encodePageToken(key map[string]types.AttributeValue) (string, error) {
@@ -327,7 +413,7 @@ func encodePageToken(key map[string]types.AttributeValue) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-func decodePageToken(token string) (map[string]types.AttributeValue, error) {
+func decodePageToken(token string, requiredKeys ...string) (map[string]types.AttributeValue, error) {
 	if token == "" {
 		return nil, nil
 	}
@@ -339,7 +425,7 @@ func decodePageToken(token string) (map[string]types.AttributeValue, error) {
 	if err := json.Unmarshal(b, &raw); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidPageToken, err)
 	}
-	for _, required := range []string{"id", "slot_shard", "provider_id"} {
+	for _, required := range requiredKeys {
 		if raw[required] == "" {
 			return nil, fmt.Errorf("%w: missing key %q", ErrInvalidPageToken, required)
 		}

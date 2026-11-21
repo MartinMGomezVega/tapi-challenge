@@ -29,7 +29,7 @@
 
 ## Fase 4: US2 — Backfill (P1)
 - [x] T016b [US2] Agregar GSI `gsi_provider` (`PK provider`, `SK id`, `INCLUDE (version, slot, shard, enabled)`) en `scripts/localstack-init.sh` y `test/testenv/localstack.go`
-- [ ] T016c [US2] Test de integración + implementación de `CountByProvider` y `ListByProvider` (ordenado por SK, proyectando `version, slot, shard, enabled`, paginado, sin `Scan`) en `internal/adapters/dynamo/requests.go` (FR-004b)
+- [x] T016c [US2] Test de integración + implementación de `CountByProvider` y `ListByProvider` (ordenado por SK, proyectando `version, slot, shard, enabled`, paginado, sin `Scan`) en `internal/adapters/dynamo/requests.go` (FR-004b)
 - [ ] T017 [US2] Test: el caso de uso `AssignSlots` es idempotente (2 runs = mismo estado), aplica rebalanceo completo si `nuevos > 1440` o asignación incremental si `nuevos ≤ 1440`, y asigna altas concurrentes (`rank ≥ k`) vía `AssignIncremental`
 - [ ] T017b [US2] Test: seguridad del día en curso (FR-005b / R1) — registro habilitado con `slot_nuevo < slot_actual ≤ slot_viejo` se despacha vía `ImmediateDispatcher`; caso inverso (ya ejecutado → slot futuro) no despacha de nuevo
 - [ ] T018 [US2] Test: reanuda desde el checkpoint `(proveedor, cursor, rank)` tras una interrupción (fake `Checkpointer`)
