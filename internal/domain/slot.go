@@ -104,14 +104,62 @@ func (a *SlotAssigner) AssignProvider(provider string, ids []string) (map[string
 
 // AssignIncremental selects the least-occupied slot in the provider's 1440-minute histogram,
 // breaking ties deterministically by hashing (provider, id). Does not mutate counts.
-func (a *SlotAssigner) AssignIncremental(_, _ string, _ []int) (SlotAssignment, error) {
-	return SlotAssignment{Slot: -1, Shard: -1}, errors.New("not implemented")
+func (a *SlotAssigner) AssignIncremental(provider, id string, counts []int) (SlotAssignment, error) {
+	if err := validateProvider(provider); err != nil {
+		return SlotAssignment{}, err
+	}
+	if strings.TrimSpace(id) == "" {
+		return SlotAssignment{}, ErrEmptyID
+	}
+	if len(counts) != SlotsPerDay {
+		return SlotAssignment{}, fmt.Errorf("%w: got length %d", ErrInvalidHistogram, len(counts))
+	}
+
+	var minSlots [SlotsPerDay]int
+	minCount := counts[0]
+	nMin := 0
+
+	for slot, c := range counts {
+		if c < 0 {
+			return SlotAssignment{}, fmt.Errorf("%w: negative count %d at slot %d", ErrInvalidHistogram, c, slot)
+		}
+		switch {
+		case c < minCount:
+			minCount = c
+			minSlots[0] = slot
+			nMin = 1
+		case c == minCount:
+			minSlots[nMin] = slot
+			nMin++
+		}
+	}
+
+	idx := int(fnv64aPair(provider, id) % uint64(nMin)) // #nosec G115 -- nMin in [1, 1440]
+	return SlotAssignment{
+		Slot:  minSlots[idx],
+		Shard: int(fnv32a(id) % a.shards),
+	}, nil
 }
 
 func fnv64a(s string) uint64 {
 	h := fnvOffset64
 	for i := range len(s) {
 		h ^= uint64(s[i])
+		h *= fnvPrime64
+	}
+	return h
+}
+
+func fnv64aPair(a, b string) uint64 {
+	h := fnvOffset64
+	for i := range len(a) {
+		h ^= uint64(a[i])
+		h *= fnvPrime64
+	}
+	h ^= '#'
+	h *= fnvPrime64
+	for i := range len(b) {
+		h ^= uint64(b[i])
 		h *= fnvPrime64
 	}
 	return h
