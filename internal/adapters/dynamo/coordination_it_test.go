@@ -4,11 +4,15 @@ package dynamo_test
 
 import (
 	"context"
+	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/martingomezvega/tapi-challenge/internal/adapters/dynamo"
 	"github.com/martingomezvega/tapi-challenge/internal/app/assignslots"
+	"github.com/martingomezvega/tapi-challenge/internal/app/dispatch"
 	"github.com/martingomezvega/tapi-challenge/internal/domain"
 	"github.com/martingomezvega/tapi-challenge/test/testenv"
 )
@@ -126,6 +130,79 @@ func TestCoordinationRepo_Integration(t *testing.T) {
 			got.Histogram != want.Histogram ||
 			!got.UpdatedAt.Equal(want.UpdatedAt) {
 			t.Fatalf("Load() mismatch:\ngot  %+v\nwant %+v", got, want)
+		}
+	})
+
+	// 002-T020: Conditional leader lease with 2 concurrent goroutines (-race) + fenced watermark.
+	t.Run("DispatcherCoordinator concurrent lease election and fenced watermark", func(t *testing.T) {
+		dc := dynamo.NewDispatcherCoordinator(env.DynamoDB, tableName)
+		now := time.Date(2026, 11, 20, 16, 0, 0, 0, time.UTC)
+
+		var (
+			wg       sync.WaitGroup
+			winners  atomic.Int32
+			winOwner string
+			winToken int64
+			mu       sync.Mutex
+		)
+
+		for _, owner := range []string{"dispatcher-az1", "dispatcher-az2"} {
+			wg.Add(1)
+			go func(id string) {
+				defer wg.Done()
+				tok, ok, err := dc.TryAcquire(ctx, id, 30*time.Second, now)
+				if err != nil {
+					t.Errorf("TryAcquire(%s): %v", id, err)
+					return
+				}
+				if ok {
+					winners.Add(1)
+					mu.Lock()
+					winOwner = id
+					winToken = tok
+					mu.Unlock()
+				}
+			}(owner)
+		}
+		wg.Wait()
+
+		if winners.Load() != 1 {
+			t.Fatalf("expected exactly 1 lease winner, got %d", winners.Load())
+		}
+
+		// Winner advances watermark cleanly.
+		c1 := domain.SlotCoord{Date: "2026-11-20", Slot: 960}
+		if err := dc.Advance(ctx, c1, winToken, now); err != nil {
+			t.Fatalf("winner Advance(): %v", err)
+		}
+		gotWM, found, err := dc.Load(ctx)
+		if err != nil || !found || gotWM != c1 {
+			t.Fatalf("Load() = (%+v, %t, %v), want (%+v, true, nil)", gotWM, found, err, c1)
+		}
+
+		// After lease expiry, other replica takes over with higher token; ex-leader's old token is fenced out.
+		other := "dispatcher-az2"
+		if winOwner == other {
+			other = "dispatcher-az1"
+		}
+		newToken, ok, err := dc.TryAcquire(ctx, other, 30*time.Second, now.Add(35*time.Second))
+		if err != nil || !ok || newToken <= winToken {
+			t.Fatalf("failover TryAcquire(%s) = (tok=%d, ok=%t, err=%v), want ok=true tok>%d", other, newToken, ok, err, winToken)
+		}
+
+		if err := dc.Advance(ctx, domain.SlotCoord{Date: "2026-11-20", Slot: 961}, winToken, now.Add(36*time.Second)); !errors.Is(err, dispatch.ErrFencingMismatch) {
+			t.Errorf("stale leader Advance() error = %v, want %v", err, dispatch.ErrFencingMismatch)
+		}
+		if err := dc.Advance(ctx, domain.SlotCoord{Date: "2026-11-20", Slot: 961}, newToken, now.Add(36*time.Second)); err != nil {
+			t.Errorf("new leader Advance() error = %v, want nil", err)
+		}
+
+		// Release allows immediate takeover without waiting for TTL.
+		if err := dc.Release(ctx, other); err != nil {
+			t.Fatalf("Release(%s): %v", other, err)
+		}
+		if _, ok, err := dc.TryAcquire(ctx, winOwner, 30*time.Second, now.Add(37*time.Second)); err != nil || !ok {
+			t.Fatalf("re-acquire after Release = (ok=%t, err=%v), want (true, nil)", ok, err)
 		}
 	})
 }

@@ -14,9 +14,9 @@
 - [x] T007 [US1] Test: si `CreatePending` devuelve `created=false`, no envía mensaje
 - [x] T008 [US1] Test: batching de 10 y re-envío de los fallidos parciales de `SendBatch`
 - [x] T009 [US1] Implementar `app/dispatch.DispatchSlot` con errgroup por shard
-- [ ] T010 [US1] Test de integración: `executions.CreatePending` condicional en LocalStack
+- [x] T010 [US1] Test de integración: `executions.CreatePending` condicional en LocalStack
 - [ ] T011 [US1] Implementar adaptador `executions` (CreatePending, MarkEnqueued con BatchWrite/Transact)
-- [ ] T012 [US1] Test de integración: mensaje FIFO con GroupId y DedupId correctos
+- [x] T012 [US1] Test de integración: mensaje FIFO con GroupId y DedupId correctos
 - [ ] T013 [US1] Implementar adaptador `sqsq.Queue.SendBatch`
 
 ## Fase 3: US2 — Catch-up (P1)
@@ -28,7 +28,7 @@
 ## Fase 4: US3 — Liderazgo (P1)
 - [x] T018 [US3] Test: sólo una de 2 instancias obtiene el lease (fake con reloj)
 - [x] T019 [US3] Test: con el lease vencido, la otra lo toma; el ex-líder no puede avanzar el watermark (fencing)
-- [ ] T020 [US3] Test de integración: lease condicional real en DynamoDB, 2 goroutines, `-race`
+- [x] T020 [US3] Test de integración: lease condicional real en DynamoDB, 2 goroutines, `-race`
 - [ ] T021 [US3] Implementar adaptador `coordination` (lease + watermark con fencing)
 
 ## Fase 5: US4 — Huérfanos (P2)

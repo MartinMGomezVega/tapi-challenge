@@ -14,6 +14,7 @@ import (
 
 	"github.com/martingomezvega/tapi-challenge/internal/app/assignslots"
 	"github.com/martingomezvega/tapi-challenge/internal/app/capacity"
+	"github.com/martingomezvega/tapi-challenge/internal/app/dispatch"
 	"github.com/martingomezvega/tapi-challenge/internal/domain"
 )
 
@@ -255,4 +256,41 @@ func (c checkpointItem) toDomain() (assignslots.BackfillCheckpoint, error) {
 		Histogram:   hist,
 		UpdatedAt:   ts.UTC(),
 	}, nil
+}
+
+// DispatcherCoordinator implements dispatch.LeaderLease and dispatch.WatermarkStore
+// over the DynamoDB coordination table using conditional writes and fencing tokens (002-T021).
+type DispatcherCoordinator struct {
+	client    *dynamodb.Client
+	tableName string
+}
+
+var (
+	_ dispatch.LeaderLease    = (*DispatcherCoordinator)(nil)
+	_ dispatch.WatermarkStore = (*DispatcherCoordinator)(nil)
+)
+
+// NewDispatcherCoordinator creates a leader-lease + fenced-watermark store.
+func NewDispatcherCoordinator(client *dynamodb.Client, tableName string) *DispatcherCoordinator {
+	return &DispatcherCoordinator{client: client, tableName: tableName}
+}
+
+// TryAcquire conditionally acquires or renews the dispatcher-leader lease, returning its fencing token.
+func (d *DispatcherCoordinator) TryAcquire(_ context.Context, _ string, _ time.Duration, _ time.Time) (int64, bool, error) {
+	return 0, false, fmt.Errorf("not implemented")
+}
+
+// Release relinquishes leadership if currently held by owner.
+func (d *DispatcherCoordinator) Release(_ context.Context, _ string) error {
+	return fmt.Errorf("not implemented")
+}
+
+// Load returns the last persisted watermark SlotCoord, or found=false if not yet initialized.
+func (d *DispatcherCoordinator) Load(_ context.Context) (domain.SlotCoord, bool, error) {
+	return domain.SlotCoord{}, false, fmt.Errorf("not implemented")
+}
+
+// Advance advances the watermark conditioned on fencingToken matching the current lease version.
+func (d *DispatcherCoordinator) Advance(_ context.Context, _ domain.SlotCoord, _ int64, _ time.Time) error {
+	return fmt.Errorf("not implemented")
 }
