@@ -15,9 +15,9 @@
 - [x] T008 [US1] Test: batching de 10 y re-envío de los fallidos parciales de `SendBatch`
 - [x] T009 [US1] Implementar `app/dispatch.DispatchSlot` con errgroup por shard
 - [x] T010 [US1] Test de integración: `executions.CreatePending` condicional en LocalStack
-- [ ] T011 [US1] Implementar adaptador `executions` (CreatePending, MarkEnqueued con BatchWrite/Transact)
+- [x] T011 [US1] Implementar adaptador `executions` (CreatePending, MarkEnqueued con BatchWrite/Transact)
 - [x] T012 [US1] Test de integración: mensaje FIFO con GroupId y DedupId correctos
-- [ ] T013 [US1] Implementar adaptador `sqsq.Queue.SendBatch`
+- [x] T013 [US1] Implementar adaptador `sqsq.Queue.SendBatch`
 
 ## Fase 3: US2 — Catch-up (P1)
 - [x] T014 [US2] Test: `Tick` con watermark atrasado 15 min despacha 15 slots en orden
@@ -29,17 +29,17 @@
 - [x] T018 [US3] Test: sólo una de 2 instancias obtiene el lease (fake con reloj)
 - [x] T019 [US3] Test: con el lease vencido, la otra lo toma; el ex-líder no puede avanzar el watermark (fencing)
 - [x] T020 [US3] Test de integración: lease condicional real en DynamoDB, 2 goroutines, `-race`
-- [ ] T021 [US3] Implementar adaptador `coordination` (lease + watermark con fencing)
+- [x] T021 [US3] Implementar adaptador `coordination` (lease + watermark con fencing)
 
 ## Fase 5: US4 — Huérfanos (P2)
 - [x] T022 [US4] Test: PENDING con más de 5 min se re-envía; ENQUEUED no
 - [x] T023 [US4] Implementar la re-emisión de huérfanos en `DispatchSlot`
 
 ## Fase 6: Servicio
-- [ ] T024 `cmd/dispatcher`: config (env), ticker alineado al minuto, `/healthz`, SIGTERM → libera el lease
+- [x] T024 `cmd/dispatcher`: config (env), ticker alineado al minuto, `/healthz`, SIGTERM → libera el lease
 - [x] T025 [P] Métricas EMF (`SlotDispatchDuration`, `RecordsDispatched`, `DispatchLagMinutes`, `IsLeader`)
-- [ ] T026 Simulación acelerada de 1 día con 100k registros en docker-compose → verifica SC-001
-- [ ] T027 [P] Dockerfile multi-stage (`golang` → `distroless/static:nonroot`, ARM64)
+- [x] T026 Simulación acelerada de 1 día con 100k registros en docker-compose → verifica SC-001
+- [x] T027 [P] Dockerfile multi-stage (`golang` → `distroless/static:nonroot`, ARM64)
 
 ## Dependencias
 001-US1 → Fase 1 → US1 → US2 → US3 → US4 → Servicio.
