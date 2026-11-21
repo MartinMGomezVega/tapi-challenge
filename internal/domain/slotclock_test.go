@@ -181,4 +181,22 @@ func TestRangeSlots_FullDayAndValidation(t *testing.T) {
 	); !errors.Is(err, domain.ErrInvalidSlot) {
 		t.Errorf("RangeSlots(invalid slot) err = %v, want %v", err, domain.ErrInvalidSlot)
 	}
+	if _, err := domain.RangeSlots(
+		domain.SlotCoord{Date: "2026-11-20", Slot: 0},
+		domain.SlotCoord{Date: "bad-date", Slot: 0},
+	); !errors.Is(err, domain.ErrInvalidRunDate) {
+		t.Errorf("RangeSlots(invalid to date) err = %v, want %v", err, domain.ErrInvalidRunDate)
+	}
+	if d, err := domain.ParseRunDate("2026-11-20"); err != nil || d != "2026-11-20" {
+		t.Errorf("ParseRunDate(valid) = (%q, %v)", d, err)
+	}
+	if got := domain.IdempotencyKey("req-1", "2026-11-20"); got != "req-1#2026-11-20" {
+		t.Errorf("IdempotencyKey() = %q, want req-1#2026-11-20", got)
+	}
+	if lag, err := domain.LagMinutes(
+		domain.SlotCoord{Date: "2026-11-21", Slot: 5},
+		domain.SlotCoord{Date: "2026-11-21", Slot: 2},
+	); err != nil || lag != 0 {
+		t.Errorf("LagMinutes(reverse) = (%d, %v), want (0, nil)", lag, err)
+	}
 }
