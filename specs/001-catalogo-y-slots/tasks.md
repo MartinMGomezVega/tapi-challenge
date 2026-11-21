@@ -48,8 +48,8 @@
 - [ ] T025 [US3] Integrar en el `reconciler` (feature 005) como paso diario
 
 ## Fase 6: Polish
-- [ ] T026 [P] Documentar el algoritmo en `docs/architecture.md` (ADR-004) con el gráfico del histograma de 1M
-- [ ] T027 Verificar cobertura ≥ 90 % en `domain` y `app`
+- [x] T026 [P] Documentar el algoritmo en `docs/architecture.md` (ADR-004) con el gráfico del histograma de 1M
+- [x] T027 Verificar cobertura ≥ 90 % en `domain` y `app`
 
 ## Dependencias
 Setup → Fundacional → US1 → (US2 ∥ US3). Las features 002 y 005 dependen de US1.

@@ -134,7 +134,27 @@ Supuestos: latencia p95 de la API (dos lambdas en cadena) `L = 400 ms`; factor d
 **Consecuencia aceptada**: hay *head-of-line blocking* por proveedor. Si un proveedor falla, se frenan sólo sus mensajes (backpressure deseado) y no los de los demás.
 
 ### ADR-004 — Distribución temporal por slots precalculados
-**Decisión**: `slot = f(provider, id) ∈ [0, 1440)`, asignado con reparto uniforme por proveedor. Dos GSIs en `requests`: `gsi_slot_shard` (`PK slot_shard`, `SK provider_id`, `INCLUDE`) para despacho y reconciliación; y `gsi_provider` (`PK provider`, `SK id`, `INCLUDE (version, slot, shard, enabled)`) para backfill en streaming ordenado por `SK` sin `Scan`, sin sort en memoria (`O(k_max)` en RAM, independiente de `N`) y sin `GetItem` adicionales para `SetSlot` condicional ni chequeo de seguridad del día en curso (FR-005b). El registro de proveedores (`k` e histograma) vive en `coordination` (usado por backfill, altas incrementales con umbral `> 1440` y validación de capacidad). Un ticker de un minuto con *watermark* y catch-up.
+**Decisión**: `slot = f(provider, id) ∈ [0, 1440)`, asignado con reparto uniforme por proveedor:
+```text
+offset(provider) = fnv64a(provider) mod 1440
+slot             = (offset + ⌊rank × 1440 / k⌋) mod 1440
+shard            = fnv32a(id) mod S
+```
+Dos GSIs en `requests`: `gsi_slot_shard` (`PK slot_shard`, `SK provider_id`, `INCLUDE`) para despacho y reconciliación; y `gsi_provider` (`PK provider`, `SK id`, `INCLUDE (version, slot, shard, enabled)`) para backfill en streaming ordenado por `SK` sin `Scan`, sin sort en memoria (`O(k_max)` en RAM, independiente de `N`) y sin `GetItem` adicionales para `SetSlot` condicional ni chequeo de seguridad del día en curso (FR-005b). El registro de proveedores (`k` e histograma) vive en `coordination` (usado por backfill, altas incrementales con umbral `> 1440` y validación de capacidad). Un ticker de un minuto con *watermark* y catch-up.
+
+**Evidencia empírica del histograma con 1M de registros (50 proveedores, S=4 shards)**:
+- **Uniforme (50 × 20k)**: promedio `694,44/min`, min `692`, max `696`, desvío máx. **0,352 %** (SC-002 ≤ 10 %), exceso por proveedor sobre `⌈k/1440⌉` = `0`, shards `[250001, 249999, 249999, 250001]`.
+- **Zipf sesgado (50 proveedores)**: promedio `694,44/min`, min `686`, max `703`, desvío máx. **1,232 %** (SC-002 ≤ 10 %), exceso por proveedor sobre `⌈k/1440⌉` = `0`, shards `[250004, 249995, 249999, 250002]`.
+
+```mermaid
+xychart-beta
+    title "Distribución por hora (promedio registros/min) — 1M Zipf (SC-002: límite +10% = 763,9)"
+    x-axis ["00h","02h","04h","06h","08h","10h","12h","14h","16h","18h","20h","22h"]
+    y-axis "Registros / minuto" 650 --> 770
+    bar [694,695,694,695,694,694,695,694,695,694,694,695]
+    line [764,764,764,764,764,764,764,764,764,764,764,764]
+```
+
 **Alternativas**: un schedule de EventBridge por registro (1M schedules, cuotas y costo, no resuelve la exclusividad), un `Scan` diario particionado (pico de carga, no reparte en el día), o agrupar/ordenar en memoria durante el backfill (~16 GB con 100M registros, viola escalabilidad `O(1)` en memoria respecto de `N`).
 
 ### ADR-005 — Idempotencia en 4 capas con la clave `request_id#run_date`
