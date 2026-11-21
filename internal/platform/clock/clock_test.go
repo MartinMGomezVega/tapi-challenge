@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/martingomezvega/tapi-challenge/internal/adapters/clock"
+	"github.com/martingomezvega/tapi-challenge/internal/platform/clock"
 )
 
 func TestNewWithSource_SpeedupScaling(t *testing.T) {
