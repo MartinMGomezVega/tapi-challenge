@@ -1,0 +1,30 @@
+{
+  "ExecutionsByStatus": 1,
+  "ProviderLatency": 42.5,
+  "_aws": {
+    "CloudWatchMetrics": [
+      {
+        "Dimensions": [
+          [
+            "provider",
+            "status"
+          ]
+        ],
+        "Metrics": [
+          {
+            "Name": "ExecutionsByStatus",
+            "Unit": "Count"
+          },
+          {
+            "Name": "ProviderLatency",
+            "Unit": "Milliseconds"
+          }
+        ],
+        "Namespace": "Tapi/ScheduledQueries"
+      }
+    ],
+    "Timestamp": 1795262400000
+  },
+  "provider": "edenor",
+  "status": "SUCCEEDED"
+}

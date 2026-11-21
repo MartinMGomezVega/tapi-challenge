@@ -1,0 +1,11 @@
+{
+  "attempt": 1,
+  "level": "INFO",
+  "msg": "execution succeeded",
+  "provider": "edenor",
+  "request_id": "req-001",
+  "run_date": "2026-11-21",
+  "service": "worker",
+  "status": "SUCCEEDED",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736"
+}
