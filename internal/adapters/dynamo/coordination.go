@@ -2,8 +2,10 @@ package dynamo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,12 +16,15 @@ import (
 
 	"github.com/martingomezvega/tapi-challenge/internal/app/assignslots"
 	"github.com/martingomezvega/tapi-challenge/internal/app/capacity"
+	"github.com/martingomezvega/tapi-challenge/internal/app/dispatch"
 	"github.com/martingomezvega/tapi-challenge/internal/domain"
 )
 
 const (
-	providerKeyPrefix = "provider#"
-	backfillKeyPrefix = "backfill#"
+	providerKeyPrefix    = "provider#"
+	backfillKeyPrefix    = "backfill#"
+	dispatcherLeaderKey  = "dispatcher-leader"
+	dispatcherWatermarkK = "dispatcher-watermark"
 )
 
 // CoordinationRepo persists provider registry entries (k + 1440-slot histogram)
@@ -255,4 +260,214 @@ func (c checkpointItem) toDomain() (assignslots.BackfillCheckpoint, error) {
 		Histogram:   hist,
 		UpdatedAt:   ts.UTC(),
 	}, nil
+}
+
+// DispatcherCoordinator implements dispatch.LeaderLease and dispatch.WatermarkStore
+// over the DynamoDB coordination table using conditional writes and fencing tokens (002-T021).
+type DispatcherCoordinator struct {
+	client    *dynamodb.Client
+	tableName string
+}
+
+var (
+	_ dispatch.LeaderLease    = (*DispatcherCoordinator)(nil)
+	_ dispatch.WatermarkStore = (*DispatcherCoordinator)(nil)
+)
+
+// NewDispatcherCoordinator creates a leader-lease + fenced-watermark store.
+func NewDispatcherCoordinator(client *dynamodb.Client, tableName string) *DispatcherCoordinator {
+	return &DispatcherCoordinator{client: client, tableName: tableName}
+}
+
+type leaseItem struct {
+	Name      string `dynamodbav:"name"`
+	Owner     string `dynamodbav:"owner"`
+	ExpiresAt int64  `dynamodbav:"expires_at"`
+	Version   int64  `dynamodbav:"version"`
+}
+
+type watermarkItem struct {
+	Name         string `dynamodbav:"name"`
+	RunDate      string `dynamodbav:"run_date"`
+	LastSlot     int    `dynamodbav:"last_slot"`
+	LeaseVersion int64  `dynamodbav:"lease_version"`
+	UpdatedAt    string `dynamodbav:"updated_at"`
+}
+
+// TryAcquire conditionally acquires or renews the dispatcher-leader lease, returning its fencing token.
+// Renewing an already-held valid lease preserves the fencing token; acquiring a fresh or expired lease
+// atomically increments version so previous leaders are fenced out.
+func (d *DispatcherCoordinator) TryAcquire(ctx context.Context, owner string, ttl time.Duration, now time.Time) (int64, bool, error) {
+	nowMs := now.UTC().UnixMilli()
+	expMs := now.UTC().Add(ttl).UnixMilli()
+
+	// Fast path: renew if we already hold a non-expired lease (keeps same fencing token).
+	renewOut, err := d.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(d.tableName),
+		Key: map[string]types.AttributeValue{
+			"name": &types.AttributeValueMemberS{Value: dispatcherLeaderKey},
+		},
+		UpdateExpression:    aws.String("SET #expires_at = :exp"),
+		ConditionExpression: aws.String("#owner = :owner AND #expires_at > :now"),
+		ExpressionAttributeNames: map[string]string{
+			"#owner":      "owner",
+			"#expires_at": "expires_at",
+		},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":owner": &types.AttributeValueMemberS{Value: owner},
+			":now":   &types.AttributeValueMemberN{Value: strconv.FormatInt(nowMs, 10)},
+			":exp":   &types.AttributeValueMemberN{Value: strconv.FormatInt(expMs, 10)},
+		},
+		ReturnValues: types.ReturnValueAllNew,
+	})
+	if err == nil {
+		var li leaseItem
+		if uErr := attributevalue.UnmarshalMap(renewOut.Attributes, &li); uErr != nil {
+			return 0, false, fmt.Errorf("unmarshal renewed lease: %w", uErr)
+		}
+		return li.Version, true, nil
+	}
+	var condErr *types.ConditionalCheckFailedException
+	if !errors.As(err, &condErr) {
+		return 0, false, fmt.Errorf("renew leader lease: %w", err)
+	}
+
+	// Acquire fresh or expired lease, atomically bumping fencing version.
+	acqOut, err := d.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(d.tableName),
+		Key: map[string]types.AttributeValue{
+			"name": &types.AttributeValueMemberS{Value: dispatcherLeaderKey},
+		},
+		UpdateExpression:    aws.String("SET #owner = :owner, #expires_at = :exp, #version = if_not_exists(#version, :zero) + :one"),
+		ConditionExpression: aws.String("attribute_not_exists(#owner) OR #owner = :empty OR #expires_at <= :now"),
+		ExpressionAttributeNames: map[string]string{
+			"#owner":      "owner",
+			"#expires_at": "expires_at",
+			"#version":    "version",
+		},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":owner": &types.AttributeValueMemberS{Value: owner},
+			":empty": &types.AttributeValueMemberS{Value: ""},
+			":now":   &types.AttributeValueMemberN{Value: strconv.FormatInt(nowMs, 10)},
+			":exp":   &types.AttributeValueMemberN{Value: strconv.FormatInt(expMs, 10)},
+			":zero":  &types.AttributeValueMemberN{Value: "0"},
+			":one":   &types.AttributeValueMemberN{Value: "1"},
+		},
+		ReturnValues: types.ReturnValueAllNew,
+	})
+	if err != nil {
+		if errors.As(err, &condErr) {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("acquire leader lease: %w", err)
+	}
+
+	var li leaseItem
+	if err := attributevalue.UnmarshalMap(acqOut.Attributes, &li); err != nil {
+		return 0, false, fmt.Errorf("unmarshal acquired lease: %w", err)
+	}
+	return li.Version, true, nil
+}
+
+// Release relinquishes leadership if currently held by owner.
+func (d *DispatcherCoordinator) Release(ctx context.Context, owner string) error {
+	_, err := d.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(d.tableName),
+		Key: map[string]types.AttributeValue{
+			"name": &types.AttributeValueMemberS{Value: dispatcherLeaderKey},
+		},
+		UpdateExpression:    aws.String("SET #owner = :empty, #expires_at = :zero"),
+		ConditionExpression: aws.String("#owner = :owner"),
+		ExpressionAttributeNames: map[string]string{
+			"#owner":      "owner",
+			"#expires_at": "expires_at",
+		},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":owner": &types.AttributeValueMemberS{Value: owner},
+			":empty": &types.AttributeValueMemberS{Value: ""},
+			":zero":  &types.AttributeValueMemberN{Value: "0"},
+		},
+	})
+	if err != nil {
+		var condErr *types.ConditionalCheckFailedException
+		if errors.As(err, &condErr) {
+			return nil
+		}
+		return fmt.Errorf("release leader lease: %w", err)
+	}
+	return nil
+}
+
+// Load returns the last persisted watermark SlotCoord, or found=false if not yet initialized.
+func (d *DispatcherCoordinator) Load(ctx context.Context) (domain.SlotCoord, bool, error) {
+	out, err := d.client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName:      aws.String(d.tableName),
+		ConsistentRead: aws.Bool(true),
+		Key: map[string]types.AttributeValue{
+			"name": &types.AttributeValueMemberS{Value: dispatcherWatermarkK},
+		},
+	})
+	if err != nil {
+		return domain.SlotCoord{}, false, fmt.Errorf("load watermark: %w", err)
+	}
+	if len(out.Item) == 0 {
+		return domain.SlotCoord{}, false, nil
+	}
+
+	var wm watermarkItem
+	if err := attributevalue.UnmarshalMap(out.Item, &wm); err != nil {
+		return domain.SlotCoord{}, false, fmt.Errorf("unmarshal watermark: %w", err)
+	}
+	return domain.SlotCoord{
+		Date: domain.RunDate(wm.RunDate),
+		Slot: wm.LastSlot,
+	}, true, nil
+}
+
+// Advance atomically verifies fencingToken against dispatcher-leader.version and updates the watermark.
+func (d *DispatcherCoordinator) Advance(ctx context.Context, coord domain.SlotCoord, fencingToken int64, now time.Time) error {
+	wmAV, err := attributevalue.MarshalMap(watermarkItem{
+		Name:         dispatcherWatermarkK,
+		RunDate:      string(coord.Date),
+		LastSlot:     coord.Slot,
+		LeaseVersion: fencingToken,
+		UpdatedAt:    now.UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		return fmt.Errorf("marshal watermark: %w", err)
+	}
+
+	_, err = d.client.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
+		TransactItems: []types.TransactWriteItem{
+			{
+				ConditionCheck: &types.ConditionCheck{
+					TableName: aws.String(d.tableName),
+					Key: map[string]types.AttributeValue{
+						"name": &types.AttributeValueMemberS{Value: dispatcherLeaderKey},
+					},
+					ConditionExpression: aws.String("#version = :token"),
+					ExpressionAttributeNames: map[string]string{
+						"#version": "version",
+					},
+					ExpressionAttributeValues: map[string]types.AttributeValue{
+						":token": &types.AttributeValueMemberN{Value: strconv.FormatInt(fencingToken, 10)},
+					},
+				},
+			},
+			{
+				Put: &types.Put{
+					TableName: aws.String(d.tableName),
+					Item:      wmAV,
+				},
+			},
+		},
+	})
+	if err != nil {
+		var txErr *types.TransactionCanceledException
+		if errors.As(err, &txErr) {
+			return fmt.Errorf("%w: token=%d", dispatch.ErrFencingMismatch, fencingToken)
+		}
+		return fmt.Errorf("advance watermark: %w", err)
+	}
+	return nil
 }

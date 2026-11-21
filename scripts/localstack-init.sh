@@ -55,9 +55,23 @@ if ! aws_cmd dynamodb describe-table --table-name executions >/dev/null 2>&1; th
     --attribute-definitions \
       AttributeName=request_id,AttributeType=S \
       AttributeName=run_date,AttributeType=S \
+      AttributeName=run_date_status,AttributeType=S \
+      AttributeName=provider_request_id,AttributeType=S \
     --key-schema \
       AttributeName=request_id,KeyType=HASH \
-      AttributeName=run_date,KeyType=RANGE >/dev/null
+      AttributeName=run_date,KeyType=RANGE \
+    --global-secondary-indexes '[
+      {
+        "IndexName": "gsi_run_date_status",
+        "KeySchema": [
+          {"AttributeName": "run_date_status", "KeyType": "HASH"},
+          {"AttributeName": "provider_request_id", "KeyType": "RANGE"}
+        ],
+        "Projection": {
+          "ProjectionType": "KEYS_ONLY"
+        }
+      }
+    ]' >/dev/null
   aws_cmd dynamodb wait table-exists --table-name executions
   aws_cmd dynamodb update-time-to-live \
     --table-name executions \

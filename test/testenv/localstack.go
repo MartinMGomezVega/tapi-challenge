@@ -14,6 +14,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/localstack"
 )
@@ -30,6 +32,7 @@ type Env struct {
 	Endpoint  string
 	AWSConfig aws.Config
 	DynamoDB  *dynamodb.Client
+	SQS       *sqs.Client
 }
 
 // StartLocalStack starts a LocalStack container with DynamoDB, SQS, and S3 enabled
@@ -84,12 +87,16 @@ func StartLocalStack(t testing.TB) *Env {
 	ddb := dynamodb.NewFromConfig(cfg, func(o *dynamodb.Options) {
 		o.BaseEndpoint = aws.String(endpoint)
 	})
+	sqsClient := sqs.NewFromConfig(cfg, func(o *sqs.Options) {
+		o.BaseEndpoint = aws.String(endpoint)
+	})
 
 	return &Env{
 		Container: container,
 		Endpoint:  endpoint,
 		AWSConfig: cfg,
 		DynamoDB:  ddb,
+		SQS:       sqsClient,
 	}
 }
 
@@ -176,4 +183,92 @@ func (e *Env) EnsureCoordinationTable(ctx context.Context, tableName string) err
 		return fmt.Errorf("wait for coordination table %q: %w", tableName, err)
 	}
 	return nil
+}
+
+// EnsureExecutionsTable idempotently creates the executions table (PK request_id, SK run_date,
+// GSI gsi_run_date_status) and waits until it is active.
+func (e *Env) EnsureExecutionsTable(ctx context.Context, tableName string) error {
+	_, err := e.DynamoDB.CreateTable(ctx, &dynamodb.CreateTableInput{
+		TableName:   aws.String(tableName),
+		BillingMode: types.BillingModePayPerRequest,
+		AttributeDefinitions: []types.AttributeDefinition{
+			{AttributeName: aws.String("request_id"), AttributeType: types.ScalarAttributeTypeS},
+			{AttributeName: aws.String("run_date"), AttributeType: types.ScalarAttributeTypeS},
+			{AttributeName: aws.String("run_date_status"), AttributeType: types.ScalarAttributeTypeS},
+			{AttributeName: aws.String("provider_request_id"), AttributeType: types.ScalarAttributeTypeS},
+		},
+		KeySchema: []types.KeySchemaElement{
+			{AttributeName: aws.String("request_id"), KeyType: types.KeyTypeHash},
+			{AttributeName: aws.String("run_date"), KeyType: types.KeyTypeRange},
+		},
+		GlobalSecondaryIndexes: []types.GlobalSecondaryIndex{
+			{
+				IndexName: aws.String("gsi_run_date_status"),
+				KeySchema: []types.KeySchemaElement{
+					{AttributeName: aws.String("run_date_status"), KeyType: types.KeyTypeHash},
+					{AttributeName: aws.String("provider_request_id"), KeyType: types.KeyTypeRange},
+				},
+				Projection: &types.Projection{
+					ProjectionType: types.ProjectionTypeKeysOnly,
+				},
+			},
+		},
+	})
+	if err != nil {
+		var inUse *types.ResourceInUseException
+		if !errors.As(err, &inUse) {
+			return fmt.Errorf("create executions table %q: %w", tableName, err)
+		}
+	}
+
+	waiter := dynamodb.NewTableExistsWaiter(e.DynamoDB)
+	if err := waiter.Wait(ctx, &dynamodb.DescribeTableInput{
+		TableName: aws.String(tableName),
+	}, 30*time.Second); err != nil {
+		return fmt.Errorf("wait for executions table %q: %w", tableName, err)
+	}
+	return nil
+}
+
+// EnsureFIFOQueue creates a high-throughput SQS FIFO queue paired with a FIFO DLQ (maxReceiveCount=6).
+func (e *Env) EnsureFIFOQueue(ctx context.Context, queueName, dlqName string) (queueURL, dlqURL string, err error) {
+	dlqOut, err := e.SQS.CreateQueue(ctx, &sqs.CreateQueueInput{
+		QueueName: aws.String(dlqName),
+		Attributes: map[string]string{
+			"FifoQueue":                 "true",
+			"ContentBasedDeduplication": "false",
+			"DeduplicationScope":        "messageGroup",
+			"FifoThroughputLimit":       "perMessageGroupId",
+		},
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("create fifo dlq %q: %w", dlqName, err)
+	}
+	dlqURL = aws.ToString(dlqOut.QueueUrl)
+
+	attrOut, err := e.SQS.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+		QueueUrl:       aws.String(dlqURL),
+		AttributeNames: []sqstypes.QueueAttributeName{sqstypes.QueueAttributeNameQueueArn},
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("get dlq arn %q: %w", dlqName, err)
+	}
+	dlqARN := attrOut.Attributes["QueueArn"]
+
+	redrive := fmt.Sprintf(`{"deadLetterTargetArn":"%s","maxReceiveCount":"6"}`, dlqARN)
+	qOut, err := e.SQS.CreateQueue(ctx, &sqs.CreateQueueInput{
+		QueueName: aws.String(queueName),
+		Attributes: map[string]string{
+			"FifoQueue":                 "true",
+			"ContentBasedDeduplication": "false",
+			"DeduplicationScope":        "messageGroup",
+			"FifoThroughputLimit":       "perMessageGroupId",
+			"VisibilityTimeout":         "60",
+			"RedrivePolicy":             redrive,
+		},
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("create fifo queue %q: %w", queueName, err)
+	}
+	return aws.ToString(qOut.QueueUrl), dlqURL, nil
 }
