@@ -43,6 +43,8 @@ Como equipo, necesito saber si algún proveedor no puede completar su volumen di
 - Un registro deshabilitado (`enabled=false`): conserva el slot pero el dispatcher lo omite.
 - Cambio de `provider` de un registro: se recalcula el slot.
 - Crecimiento de N: aumentar S (shards) requiere re-sharding online. El slot no cambia, sólo el shard.
+- Altas concurrentes durante un rebalanceo: si aparecen registros nuevos entre el `COUNT` (`k`) y el streaming de `gsi_provider` (`rank ≥ k`), esos registros se asignan mediante el histograma en construcción (`AssignIncremental`) sin abortar el backfill.
+- Rebalanceo durante el día en curso (R1): si un rebalanceo mueve un registro habilitado desde un slot futuro/actual a uno ya pasado (`slot_nuevo < slot_actual ≤ slot_viejo`), se despacha de inmediato por la vía idempotente de despacho (`ImmediateDispatcher`) para no perder la ejecución de hoy. En el caso inverso (ya ejecutado hoy y movido a un slot futuro), la idempotencia `request_id#run_date` (ADR-005) garantiza que no se ejecute dos veces.
 
 ## Requirements *(obligatorio)*
 
@@ -51,8 +53,9 @@ Como equipo, necesito saber si algún proveedor no puede completar su volumen di
 - **FR-002**: La asignación DEBE ser uniforme a nivel global y por proveedor (criterios de US1).
 - **FR-003**: El sistema DEBE asignar `shard = hash(id) mod S`, con S configurable.
 - **FR-004**: El sistema DEBE exponer la consulta "registros habilitados del slot X, shard Y" sin `Scan` (GSI `gsi_slot_shard`).
-- **FR-004b**: El sistema DEBE exponer la consulta ordenada de registros por proveedor sin `Scan` (GSI `gsi_provider`: `PK provider`, `SK id`, `KEYS_ONLY`), permitiendo calcular `rank` en streaming con memoria acotada a `O(k_max)` (independiente de `N`).
-- **FR-005**: El backfill DEBE ser idempotente, reanudable por checkpoint `(proveedor, cursor)`, paralelizado por proveedor con rate limit configurable de WCU, y persistir el registro de proveedores (`k` e histograma) en `coordination`. Si un proveedor acumula `> 1440` registros nuevos desde el último backfill, se rebalancea completo; con `≤ 1440`, se aplica asignación incremental por histograma.
+- **FR-004b**: El sistema DEBE exponer la consulta ordenada de registros por proveedor sin `Scan` (GSI `gsi_provider`: `PK provider`, `SK id`, proyección `INCLUDE (version, slot, shard, enabled)`), permitiendo calcular `rank` en streaming con memoria acotada a `O(k_max)` (independiente de `N`) y ejecutar `SetSlot` condicional sin `GetItem` adicionales.
+- **FR-005**: El backfill DEBE ser idempotente, reanudable por checkpoint `(proveedor, cursor)`, paralelizado por proveedor con rate limit configurable de WCU, y persistir el registro de proveedores (`k` e histograma) en `coordination`. Si un proveedor acumula `> 1440` registros nuevos desde el último backfill, se rebalancea completo (asignando por histograma cualquier alta concurrente con `rank ≥ k`); con `≤ 1440`, se aplica asignación incremental por histograma.
+- **FR-005b**: Un rebalanceo NUNCA debe hacer perder la ejecución del día en curso (R1): todo registro habilitado movido de `slot_viejo ≥ slot_actual` a `slot_nuevo < slot_actual` DEBE despacharse de inmediato por la vía idempotente (`ImmediateDispatcher`).
 - **FR-006**: El sistema DEBE validar diariamente la capacidad por proveedor (US3) a partir del registro de proveedores en `coordination`.
 - **FR-007**: Los registros DEBEN validarse en el alta: `endpoint` relativo a una allowlist y `body` como JSON válido de ≤ 256 KB.
 
