@@ -45,7 +45,7 @@
 ## Fase 5: US3 — Capacidad por proveedor (P2)
 - [x] T023 [US3] Test: el cálculo `k × p95 > 86400 × 0,7` marca al proveedor como sobre capacidad
 - [x] T024 [US3] Implementar `app/capacity` + métrica EMF `ProviderOverCapacity`
-- [ ] T025 [US3] Integrar en el `reconciler` (feature 005) como paso diario
+- [x] T025 [US3] Integrar en el `reconciler` (feature 005) como paso diario
 
 ## Fase 6: Polish
 - [x] T026 [P] Documentar el algoritmo en `docs/architecture.md` (ADR-004) con el gráfico del histograma de 1M
