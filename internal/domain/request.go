@@ -41,6 +41,10 @@ var (
 	ErrInvalidSlot = errors.New("slot must be in [0, 1440)")
 	// ErrInvalidShard indicates a shard outside [0, shards).
 	ErrInvalidShard = errors.New("shard is out of range")
+	// ErrRequestNotFound indicates no request exists with the given ID.
+	ErrRequestNotFound = errors.New("request not found")
+	// ErrVersionConflict indicates an optimistic locking conflict on Request.Version.
+	ErrVersionConflict = errors.New("request version conflict")
 )
 
 // Request represents a user's daily provider query registration in the catalog.

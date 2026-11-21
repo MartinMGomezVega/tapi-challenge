@@ -21,7 +21,7 @@
 - [x] T011 [US1] Implementar `SlotAssigner` (offset + rank) → `internal/domain/slot.go`
 - [x] T012 [US1] Test: asignación incremental elige el minuto de menor ocupación
 - [x] T013 [US1] Implementar asignación incremental con histograma
-- [ ] T014 [US1] Test de integración: `ListBySlotShard` devuelve sólo los ítems del slot, paginado → `internal/adapters/dynamo/requests_it_test.go`
+- [x] T014 [US1] Test de integración: `ListBySlotShard` devuelve sólo los ítems del slot, paginado → `internal/adapters/dynamo/requests_it_test.go`
 - [ ] T015 [US1] Implementar adaptador `requests` (GetItem, Query GSI, SetSlot condicional por `version`)
 - [ ] T016 [P] [US1] Benchmark `BenchmarkAssign1M` (< 2 s)
 
