@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/martingomezvega/tapi-challenge/internal/adapters/dynamo"
 	"github.com/martingomezvega/tapi-challenge/internal/app/assignslots"
 	"github.com/martingomezvega/tapi-challenge/internal/domain"
@@ -183,13 +185,18 @@ func TestBackfill_LocalStack_Integration(t *testing.T) {
 	})
 
 	t.Run("real app+dynamo live heap stays bounded when N scales 4x with fixed k_max", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
 
-		const (
-			kMax   = 50
-			shards = 4
-		)
+		kMax := 5_000
+		pageSize := int32(500)
+		numProvs1x, numProvs4x := 4, 16 // 20,000 vs 80,000 records (k_max=5,000)
+		if testing.Short() {
+			kMax = 100
+			pageSize = 25
+			numProvs1x, numProvs4x = 2, 8 // 200 vs 800 records for fast PR integration gate
+		}
+		const shards = 4
 		assigner, _ := domain.NewSlotAssigner(shards)
 		logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 		ts := time.Date(2026, 11, 20, 4, 0, 0, 0, time.UTC)
@@ -204,7 +211,7 @@ func TestBackfill_LocalStack_Integration(t *testing.T) {
 				t.Fatalf("EnsureCoordinationTable(%s): %v", coordTable, err)
 			}
 
-			reqRepo := dynamo.NewRequestsRepo(env.DynamoDB, reqTable, dynamo.WithPageSize(10))
+			reqRepo := dynamo.NewRequestsRepo(env.DynamoDB, reqTable, dynamo.WithPageSize(pageSize))
 			coordRepo := dynamo.NewCoordinationRepo(env.DynamoDB, coordTable)
 			seedCatalog(ctx, t, reqRepo, coordRepo, numProvs, kMax, ts)
 
@@ -212,7 +219,7 @@ func TestBackfill_LocalStack_Integration(t *testing.T) {
 			uc, err := assignslots.New(
 				assigner, reqRepo, reqRepo, sampler, coordRepo,
 				assignslots.NoopImmediateDispatcher{}, fakeClock{now: ts}, logger,
-				assignslots.Config{Workers: 1},
+				assignslots.Config{Workers: 4},
 			)
 			if err != nil {
 				t.Fatalf("assignslots.New(%s): %v", suffix, err)
@@ -227,11 +234,11 @@ func TestBackfill_LocalStack_Integration(t *testing.T) {
 			return sampler.peakHeap.Load()
 		}
 
-		peak1x := measure("1x", 2) // 100 records (k_max=50)
-		peak4x := measure("4x", 8) // 400 records (4x N, fixed k_max=50)
+		peak1x := measure("1x", numProvs1x)
+		peak4x := measure("4x", numProvs4x)
 
-		t.Logf("real app+dynamo live heap (k_max=%d): 100 recs peak=%d KiB | 400 recs peak=%d KiB",
-			kMax, peak1x/1024, peak4x/1024)
+		t.Logf("real app+dynamo live heap (k_max=%d): %d recs peak=%d KiB | %d recs peak=%d KiB",
+			kMax, numProvs1x*kMax, peak1x/1024, numProvs4x*kMax, peak4x/1024)
 
 		const maxAllowedDeltaBytes = 8 * 1024 * 1024
 		if peak4x > peak1x+maxAllowedDeltaBytes {
@@ -249,33 +256,51 @@ func seedCatalog(
 	ts time.Time,
 ) {
 	t.Helper()
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(8)
+
 	for p := range numProvs {
 		provider := fmt.Sprintf("prov-%02d", p)
-		batch := make([]domain.Request, 0, perProv)
-		for i := range perProv {
-			batch = append(batch, domain.Request{
-				ID:        fmt.Sprintf("%s-req-%05d", provider, i),
-				Provider:  provider,
-				Endpoint:  fmt.Sprintf("/v1/providers/%s/debt", provider),
-				Method:    "POST",
-				Body:      []byte(`{"account":"masked"}`),
-				Enabled:   true,
-				Slot:      -1,
-				Shard:     -1,
-				Version:   1,
-				CreatedAt: ts,
-				UpdatedAt: ts,
-			})
-		}
-		if err := reqRepo.PutBatch(ctx, batch); err != nil {
-			t.Fatalf("PutBatch(%s): %v", provider, err)
-		}
-		if err := coordRepo.SaveProviderState(ctx, assignslots.ProviderState{
-			Provider:   provider,
-			Backfilled: false,
-			UpdatedAt:  ts,
-		}); err != nil {
-			t.Fatalf("SaveProviderState(%s): %v", provider, err)
-		}
+		g.Go(func() error {
+			const chunkSize = 250
+			batch := make([]domain.Request, 0, chunkSize)
+			for i := range perProv {
+				batch = append(batch, domain.Request{
+					ID:        fmt.Sprintf("%s-req-%05d", provider, i),
+					Provider:  provider,
+					Endpoint:  fmt.Sprintf("/v1/providers/%s/debt", provider),
+					Method:    "POST",
+					Body:      []byte(`{"account":"masked"}`),
+					Enabled:   true,
+					Slot:      -1,
+					Shard:     -1,
+					Version:   1,
+					CreatedAt: ts,
+					UpdatedAt: ts,
+				})
+				if len(batch) == chunkSize {
+					if err := reqRepo.PutBatch(gctx, batch); err != nil {
+						return fmt.Errorf("PutBatch(%s): %w", provider, err)
+					}
+					batch = batch[:0]
+				}
+			}
+			if len(batch) > 0 {
+				if err := reqRepo.PutBatch(gctx, batch); err != nil {
+					return fmt.Errorf("PutBatch(%s): %w", provider, err)
+				}
+			}
+			if err := coordRepo.SaveProviderState(gctx, assignslots.ProviderState{
+				Provider:   provider,
+				Backfilled: false,
+				UpdatedAt:  ts,
+			}); err != nil {
+				return fmt.Errorf("SaveProviderState(%s): %w", provider, err)
+			}
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		t.Fatalf("seedCatalog: %v", err)
 	}
 }

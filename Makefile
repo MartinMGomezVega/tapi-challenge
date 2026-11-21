@@ -1,4 +1,4 @@
-.PHONY: up down test test-full cover it lint bench demo
+.PHONY: up down test test-full cover it it-full lint bench demo
 
 SHELL := /bin/sh
 MIN_COVERAGE := 90
@@ -25,7 +25,10 @@ cover:
 	awk -v cov="$$total" -v min="$(MIN_COVERAGE)" 'BEGIN { if (cov + 0 < min + 0) { exit 1 } }'
 
 it:
-	go test -tags=integration -race -v ./...
+	go test -tags=integration -short -race -v ./...
+
+it-full:
+	go test -tags=integration -race -v -timeout 15m ./...
 
 lint:
 	@unformatted=$$(gofmt -l .); \
