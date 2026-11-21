@@ -23,16 +23,59 @@ type ExecutionSnapshot struct {
 }
 
 // ComputeCoverage returns terminal / expected in [0, 1] (1.0 when expected == 0).
-func ComputeCoverage(_, _ int) float64 { return 0 }
+func ComputeCoverage(terminal, expected int) float64 {
+	if expected <= 0 {
+		return 1.0
+	}
+	if terminal <= 0 {
+		return 0.0
+	}
+	if terminal >= expected {
+		return 1.0
+	}
+	return float64(terminal) / float64(expected)
+}
 
 // SlotStartTime returns the wall-clock start time of slot in date using tz (UTC when tz is nil).
-func SlotStartTime(_ RunDate, _ int, _ *time.Location) time.Time { return time.Time{} }
+func SlotStartTime(date RunDate, slot int, tz *time.Location) time.Time {
+	if tz == nil {
+		tz = time.UTC
+	}
+	base, err := date.Time()
+	if err != nil {
+		return time.Time{}
+	}
+	dayStart := time.Date(base.Year(), base.Month(), base.Day(), 0, 0, 0, 0, tz)
+	return dayStart.Add(time.Duration(slot) * time.Minute)
+}
 
 // ShouldExpectExecution reports whether a request created at createdAt is expected to run
 // on date at slot (false if created strictly after the slot started, 005 Edge Cases).
-func ShouldExpectExecution(_ time.Time, _ RunDate, _ int, _ *time.Location) bool { return false }
+func ShouldExpectExecution(createdAt time.Time, date RunDate, slot int, tz *time.Location) bool {
+	if createdAt.IsZero() {
+		return true
+	}
+	slotStart := SlotStartTime(date, slot, tz)
+	if slotStart.IsZero() {
+		return true
+	}
+	return !createdAt.After(slotStart)
+}
 
 // ClassifyExecution classifies a single expected request against its ExecutionSnapshot (nil if missing).
-func ClassifyExecution(_ *ExecutionSnapshot, _ time.Time, _ time.Duration) ReconcileClass {
-	return ReconcileMissing
+func ClassifyExecution(snap *ExecutionSnapshot, now time.Time, staleAfter time.Duration) ReconcileClass {
+	if snap == nil {
+		return ReconcileMissing
+	}
+	if snap.Status.IsTerminal() {
+		return ReconcileTerminal
+	}
+	ref := snap.UpdatedAt
+	if ref.IsZero() {
+		ref = snap.CreatedAt
+	}
+	if staleAfter > 0 && now.Sub(ref) > staleAfter {
+		return ReconcileStuck
+	}
+	return ReconcileInFlight
 }
