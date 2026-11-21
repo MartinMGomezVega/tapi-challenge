@@ -151,7 +151,7 @@ resource "aws_cloudwatch_dashboard" "operations" {
         width  = 12
         height = 6
         properties = {
-          title   = "Dispatcher — Records Dispatched & Lag"
+          title = "Dispatcher — Records Dispatched & Lag"
           metrics = [
             [var.metric_namespace, "RecordsDispatched", { stat = "Sum" }],
             [var.metric_namespace, "DispatchLagMinutes", { stat = "Maximum", yAxis = "right" }]
@@ -166,7 +166,7 @@ resource "aws_cloudwatch_dashboard" "operations" {
         width  = 12
         height = 6
         properties = {
-          title   = "Daily Coverage (%) & Missing Executions"
+          title = "Daily Coverage (%) & Missing Executions"
           metrics = [
             [var.metric_namespace, "DailyCoverage", { stat = "Minimum" }],
             [var.metric_namespace, "MissingExecutions", { stat = "Maximum", yAxis = "right" }]
@@ -181,7 +181,7 @@ resource "aws_cloudwatch_dashboard" "operations" {
         width  = 12
         height = 6
         properties = {
-          title   = "Worker — Provider Latency (p50 / p95 / p99)"
+          title = "Worker — Provider Latency (p50 / p95 / p99)"
           metrics = [
             [var.metric_namespace, "ProviderLatency", { stat = "p50" }],
             [var.metric_namespace, "ProviderLatency", { stat = "p95" }],
@@ -197,7 +197,7 @@ resource "aws_cloudwatch_dashboard" "operations" {
         width  = 12
         height = 6
         properties = {
-          title   = "Errors, Breakers & SQS FIFO Backlog"
+          title = "Errors, Breakers & SQS FIFO Backlog"
           metrics = [
             [var.metric_namespace, "ExecutionFailed", { stat = "Sum" }],
             [var.metric_namespace, "BreakerOpen", { stat = "Maximum" }],
@@ -214,7 +214,7 @@ resource "aws_cloudwatch_dashboard" "operations" {
         width  = 24
         height = 6
         properties = {
-          title   = "Account Lambda Concurrency vs Quota"
+          title = "Account Lambda Concurrency vs Quota"
           metrics = [
             ["AWS/Lambda", "ConcurrentExecutions", { stat = "Maximum" }],
             ["AWS/Lambda", "Throttles", { stat = "Sum", yAxis = "right" }]
@@ -237,13 +237,13 @@ resource "aws_glue_catalog_table" "reconciliation_daily" {
   table_type    = "EXTERNAL_TABLE"
 
   parameters = {
-    "projection.enabled"                    = "true"
-    "projection.partition_date.type"        = "date"
-    "projection.partition_date.format"      = "yyyy-MM-dd"
-    "projection.partition_date.range"       = "2026-01-01,NOW"
-    "storage.location.template"             = "s3://${var.results_bucket_name}/reports/run_date=$${partition_date}/"
-    "skip.header.line.count"                = "1"
-    "classification"                        = "csv"
+    "projection.enabled"               = "true"
+    "projection.partition_date.type"   = "date"
+    "projection.partition_date.format" = "yyyy-MM-dd"
+    "projection.partition_date.range"  = "2026-01-01,NOW"
+    "storage.location.template"        = "s3://${var.results_bucket_name}/reports/run_date=$${partition_date}/"
+    "skip.header.line.count"           = "1"
+    "classification"                   = "csv"
   }
 
   partition_keys {
