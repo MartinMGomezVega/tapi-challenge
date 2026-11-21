@@ -376,3 +376,177 @@ func zipfProviderCounts(total, n int) []int {
 	counts[0] += total - assigned
 	return counts
 }
+
+// T012: Incremental assignment selects the minimum-occupancy minute (plan.md, FR-001, FR-002).
+func TestSlotAssigner_AssignIncremental_PicksUniqueMinimum(t *testing.T) {
+	t.Parallel()
+
+	assigner, err := domain.NewSlotAssigner(4)
+	if err != nil {
+		t.Fatalf("NewSlotAssigner(4): %v", err)
+	}
+
+	hist := make([]int, domain.SlotsPerDay)
+	for i := range hist {
+		hist[i] = 10
+	}
+	hist[742] = 9
+	snapshot := slices.Clone(hist)
+
+	got, err := assigner.AssignIncremental("edenor", "req-new-1", hist)
+	if err != nil {
+		t.Fatalf("AssignIncremental(): %v", err)
+	}
+	if got.Slot != 742 {
+		t.Errorf("Slot = %d, want 742 (unique minimum)", got.Slot)
+	}
+	if got.Shard < 0 || got.Shard >= 4 {
+		t.Errorf("Shard = %d, want in [0, 4)", got.Shard)
+	}
+	if !slices.Equal(hist, snapshot) {
+		t.Error("AssignIncremental mutated input histogram")
+	}
+}
+
+func TestSlotAssigner_AssignIncremental_TieBreakDeterministic(t *testing.T) {
+	t.Parallel()
+
+	assigner, err := domain.NewSlotAssigner(8)
+	if err != nil {
+		t.Fatalf("NewSlotAssigner(8): %v", err)
+	}
+
+	hist := make([]int, domain.SlotsPerDay)
+	for i := range hist {
+		hist[i] = 5
+	}
+	tied := []int{100, 500, 1200}
+	for _, s := range tied {
+		hist[s] = 2
+	}
+
+	first, err := assigner.AssignIncremental("metrogas", "req-tie-99", hist)
+	if err != nil {
+		t.Fatalf("first AssignIncremental(): %v", err)
+	}
+	if !slices.Contains(tied, first.Slot) {
+		t.Fatalf("Slot = %d, want one of tied minimums %v", first.Slot, tied)
+	}
+
+	second, err := assigner.AssignIncremental("metrogas", "req-tie-99", hist)
+	if err != nil {
+		t.Fatalf("second AssignIncremental(): %v", err)
+	}
+	if first != second {
+		t.Errorf("tie-break not deterministic: first=%+v second=%+v", first, second)
+	}
+}
+
+func TestSlotAssigner_AssignIncremental_SequentialUniformity(t *testing.T) {
+	t.Parallel()
+
+	assigner, err := domain.NewSlotAssigner(4)
+	if err != nil {
+		t.Fatalf("NewSlotAssigner(4): %v", err)
+	}
+
+	hist := make([]int, domain.SlotsPerDay)
+	for i := range 3000 {
+		got, err := assigner.AssignIncremental("aysa", "req-"+strconv.Itoa(i), hist)
+		if err != nil {
+			t.Fatalf("AssignIncremental(%d): %v", i, err)
+		}
+		hist[got.Slot]++
+
+		if i == domain.SlotsPerDay-1 {
+			if slices.Min(hist) != 1 || slices.Max(hist) != 1 {
+				t.Fatalf("after 1440 inserts expected every slot=1, got min=%d max=%d",
+					slices.Min(hist), slices.Max(hist))
+			}
+		}
+	}
+
+	if diff := slices.Max(hist) - slices.Min(hist); diff > 1 {
+		t.Errorf("after 3000 inserts max-min = %d > 1 (min=%d max=%d)",
+			diff, slices.Min(hist), slices.Max(hist))
+	}
+}
+
+func TestSlotAssigner_AssignIncremental_Property(t *testing.T) {
+	t.Parallel()
+
+	rapid.Check(t, func(t *rapid.T) {
+		shards := rapid.IntRange(1, 32).Draw(t, "shards")
+		provider := rapid.StringMatching(`[a-z][a-z0-9]{2,10}`).Draw(t, "provider")
+		id := rapid.StringMatching(`[a-z0-9-]{3,16}`).Draw(t, "id")
+		base := rapid.IntRange(0, 500).Draw(t, "base")
+		numLows := rapid.IntRange(1, 20).Draw(t, "numLows")
+
+		hist := make([]int, domain.SlotsPerDay)
+		for i := range hist {
+			hist[i] = base + 5
+		}
+		minVal := base
+		for j := range numLows {
+			slot := rapid.IntRange(0, domain.SlotsPerDay-1).Draw(t, fmt.Sprintf("low_%d", j))
+			hist[slot] = minVal
+		}
+
+		assigner, err := domain.NewSlotAssigner(shards)
+		if err != nil {
+			t.Fatalf("NewSlotAssigner(%d): %v", shards, err)
+		}
+
+		got, err := assigner.AssignIncremental(provider, id, hist)
+		if err != nil {
+			t.Fatalf("AssignIncremental(): %v", err)
+		}
+		if got.Slot < 0 || got.Slot >= domain.SlotsPerDay {
+			t.Fatalf("slot %d out of bounds", got.Slot)
+		}
+		if got.Shard < 0 || got.Shard >= shards {
+			t.Fatalf("shard %d out of bounds", got.Shard)
+		}
+		if hist[got.Slot] != minVal {
+			t.Fatalf("chosen slot %d has occupancy %d, want minimum %d", got.Slot, hist[got.Slot], minVal)
+		}
+	})
+}
+
+func TestSlotAssigner_AssignIncremental_InvalidInputs(t *testing.T) {
+	t.Parallel()
+
+	assigner, err := domain.NewSlotAssigner(4)
+	if err != nil {
+		t.Fatalf("NewSlotAssigner(4): %v", err)
+	}
+
+	validHist := make([]int, domain.SlotsPerDay)
+	negHist := make([]int, domain.SlotsPerDay)
+	negHist[10] = -1
+
+	cases := []struct {
+		name     string
+		provider string
+		id       string
+		hist     []int
+		wantErr  error
+	}{
+		{name: "nil histogram", provider: "edenor", id: "r1", hist: nil, wantErr: domain.ErrInvalidHistogram},
+		{name: "short histogram", provider: "edenor", id: "r1", hist: make([]int, 1439), wantErr: domain.ErrInvalidHistogram},
+		{name: "long histogram", provider: "edenor", id: "r1", hist: make([]int, 1441), wantErr: domain.ErrInvalidHistogram},
+		{name: "negative count", provider: "edenor", id: "r1", hist: negHist, wantErr: domain.ErrInvalidHistogram},
+		{name: "invalid provider", provider: "", id: "r1", hist: validHist, wantErr: domain.ErrInvalidProvider},
+		{name: "empty id", provider: "edenor", id: "", hist: validHist, wantErr: domain.ErrEmptyID},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := assigner.AssignIncremental(tc.provider, tc.id, tc.hist)
+			if !errors.Is(err, tc.wantErr) {
+				t.Errorf("AssignIncremental() error = %v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+}

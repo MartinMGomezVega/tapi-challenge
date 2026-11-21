@@ -19,7 +19,7 @@
 - [x] T009 [US1] Test de propiedad: uniformidad global ≤ 1,10 × promedio con 1M
 - [x] T010 [US1] Test de propiedad: uniformidad por proveedor (`≤ ⌈k/1440⌉+1` por minuto) y k < 1440 equiespaciado
 - [x] T011 [US1] Implementar `SlotAssigner` (offset + rank) → `internal/domain/slot.go`
-- [ ] T012 [US1] Test: asignación incremental elige el minuto de menor ocupación
+- [x] T012 [US1] Test: asignación incremental elige el minuto de menor ocupación
 - [ ] T013 [US1] Implementar asignación incremental con histograma
 - [ ] T014 [US1] Test de integración: `ListBySlotShard` devuelve sólo los ítems del slot, paginado → `internal/adapters/dynamo/requests_it_test.go`
 - [ ] T015 [US1] Implementar adaptador `requests` (GetItem, Query GSI, SetSlot condicional por `version`)

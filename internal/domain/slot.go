@@ -102,6 +102,12 @@ func (a *SlotAssigner) AssignProvider(provider string, ids []string) (map[string
 	return out, nil
 }
 
+// AssignIncremental selects the least-occupied slot in the provider's 1440-minute histogram,
+// breaking ties deterministically by hashing (provider, id). Does not mutate counts.
+func (a *SlotAssigner) AssignIncremental(_, _ string, _ []int) (SlotAssignment, error) {
+	return SlotAssignment{Slot: -1, Shard: -1}, errors.New("not implemented")
+}
+
 func fnv64a(s string) uint64 {
 	h := fnvOffset64
 	for i := range len(s) {
