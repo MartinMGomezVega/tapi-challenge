@@ -70,6 +70,18 @@ type RequestKey struct {
 	CreatedAt time.Time
 }
 
+// ProviderRequestItem is the lightweight projection stored in gsi_provider (FR-004b),
+// returned in ascending SK=id order so streaming backfill computes rank without sorting
+// or extra GetItem calls.
+type ProviderRequestItem struct {
+	ID       string
+	Provider string
+	Version  int64
+	Slot     int
+	Shard    int
+	Enabled  bool
+}
+
 // NewRequestInput holds input fields for creating a new catalog Request.
 type NewRequestInput struct {
 	ID       string

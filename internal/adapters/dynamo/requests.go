@@ -20,9 +20,10 @@ import (
 )
 
 const (
-	// DefaultPageSize is the default Query limit per page on gsi_slot_shard.
+	// DefaultPageSize is the default Query limit per page on GSIs.
 	DefaultPageSize int32 = 100
 	gsiSlotShard          = "gsi_slot_shard"
+	gsiProvider           = "gsi_provider"
 )
 
 // ErrInvalidPageToken indicates a malformed pagination cursor passed to ListBySlotShard.
@@ -293,6 +294,18 @@ func (r *RequestsRepo) SetSlot(ctx context.Context, id string, slot, shard int, 
 		return fmt.Errorf("set slot for request %s: %w", id, err)
 	}
 	return nil
+}
+
+// CountByProvider returns the total number of requests registered for provider using
+// gsi_provider with Select=COUNT (no Scan, no items transferred).
+func (r *RequestsRepo) CountByProvider(_ context.Context, _ string) (int, error) {
+	return 0, errors.New("not implemented")
+}
+
+// ListByProvider queries gsi_provider in ascending SK=id order, returning projected
+// (id, provider, version, slot, shard, enabled) items paginated by cursor (FR-004b).
+func (r *RequestsRepo) ListByProvider(_ context.Context, _, _ string) ([]domain.ProviderRequestItem, string, error) {
+	return nil, "", errors.New("not implemented")
 }
 
 func encodePageToken(key map[string]types.AttributeValue) (string, error) {

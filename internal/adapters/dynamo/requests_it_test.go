@@ -217,6 +217,91 @@ func TestRequestsRepo_Integration(t *testing.T) {
 			t.Errorf("SetSlot(shard=-1) error = %v, want %v", err, domain.ErrInvalidShard)
 		}
 	})
+
+	// T016c: gsi_provider CountByProvider + ListByProvider ordered by SK with projected fields (FR-004b).
+	t.Run("CountByProvider and ListByProvider ordered by SK with projected attrs and pagination", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		const tableName = "requests_gsi_provider"
+		if err := env.EnsureRequestsTable(ctx, tableName); err != nil {
+			t.Fatalf("EnsureRequestsTable: %v", err)
+		}
+
+		repo := dynamo.NewRequestsRepo(env.DynamoDB, tableName, dynamo.WithPageSize(2))
+		ts := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+
+		// Insert in intentionally scrambled ID order to verify DynamoDB SK sorting.
+		seed := []domain.Request{
+			{ID: "id-05", Provider: "edenor", Endpoint: "/v1/providers/edenor/debt", Method: "POST", Body: []byte(`{}`), Enabled: true, Slot: 500, Shard: 2, Version: 3, CreatedAt: ts, UpdatedAt: ts},
+			{ID: "id-01", Provider: "edenor", Endpoint: "/v1/providers/edenor/debt", Method: "POST", Body: []byte(`{}`), Enabled: true, Slot: -1, Shard: -1, Version: 1, CreatedAt: ts, UpdatedAt: ts},
+			{ID: "id-04", Provider: "edenor", Endpoint: "/v1/providers/edenor/debt", Method: "POST", Body: []byte(`{}`), Enabled: false, Slot: 400, Shard: 1, Version: 2, CreatedAt: ts, UpdatedAt: ts},
+			{ID: "id-02", Provider: "edenor", Endpoint: "/v1/providers/edenor/debt", Method: "POST", Body: []byte(`{}`), Enabled: true, Slot: 100, Shard: 0, Version: 4, CreatedAt: ts, UpdatedAt: ts},
+			{ID: "id-03", Provider: "edenor", Endpoint: "/v1/providers/edenor/debt", Method: "POST", Body: []byte(`{}`), Enabled: true, Slot: -1, Shard: -1, Version: 1, CreatedAt: ts, UpdatedAt: ts},
+			// Other provider -> must not appear for edenor
+			makeReq("other-1", "metrogas", 10, 0, true, ts),
+			makeReq("other-2", "metrogas", 20, 1, true, ts),
+		}
+		for _, req := range seed {
+			if err := repo.Put(ctx, req); err != nil {
+				t.Fatalf("Put(%s): %v", req.ID, err)
+			}
+		}
+
+		count, err := repo.CountByProvider(ctx, "edenor")
+		if err != nil {
+			t.Fatalf("CountByProvider(edenor): %v", err)
+		}
+		if count != 5 {
+			t.Fatalf("CountByProvider(edenor) = %d, want 5", count)
+		}
+
+		emptyCount, err := repo.CountByProvider(ctx, "unknown-provider")
+		if err != nil {
+			t.Fatalf("CountByProvider(unknown): %v", err)
+		}
+		if emptyCount != 0 {
+			t.Fatalf("CountByProvider(unknown) = %d, want 0", emptyCount)
+		}
+
+		var got []domain.ProviderRequestItem
+		page := ""
+		pages := 0
+		for {
+			items, nextPage, err := repo.ListByProvider(ctx, "edenor", page)
+			if err != nil {
+				t.Fatalf("ListByProvider(page=%d): %v", pages, err)
+			}
+			pages++
+			got = append(got, items...)
+			if nextPage == "" {
+				break
+			}
+			page = nextPage
+			if pages > 20 {
+				t.Fatal("pagination loop exceeded 20 pages")
+			}
+		}
+
+		if pages < 2 {
+			t.Errorf("expected multiple pages with pageSize=2, got %d", pages)
+		}
+
+		want := []domain.ProviderRequestItem{
+			{ID: "id-01", Provider: "edenor", Version: 1, Slot: -1, Shard: -1, Enabled: true},
+			{ID: "id-02", Provider: "edenor", Version: 4, Slot: 100, Shard: 0, Enabled: true},
+			{ID: "id-03", Provider: "edenor", Version: 1, Slot: -1, Shard: -1, Enabled: true},
+			{ID: "id-04", Provider: "edenor", Version: 2, Slot: 400, Shard: 1, Enabled: false},
+			{ID: "id-05", Provider: "edenor", Version: 3, Slot: 500, Shard: 2, Enabled: true},
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("ListByProvider() mismatch:\ngot  %+v\nwant %+v", got, want)
+		}
+
+		if _, _, err := repo.ListByProvider(ctx, "edenor", "!!!bad-token!!!"); !errors.Is(err, dynamo.ErrInvalidPageToken) {
+			t.Errorf("ListByProvider(bad token) error = %v, want %v", err, dynamo.ErrInvalidPageToken)
+		}
+	})
 }
 
 func makeReq(id, provider string, slot, shard int, enabled bool, ts time.Time) domain.Request {
