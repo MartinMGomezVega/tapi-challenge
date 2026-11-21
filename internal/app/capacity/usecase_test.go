@@ -158,4 +158,36 @@ func TestUseCase_ValidationAndErrors(t *testing.T) {
 	if _, err := uc.Check(context.Background()); !errors.Is(err, boom) {
 		t.Errorf("Check() error = %v, want %v", err, boom)
 	}
+
+	if _, err := capacity.New(fakeLister{}, nil, nil, capacity.Config{DefaultLatency: -1}); !errors.Is(err, capacity.ErrInvalidConfig) {
+		t.Errorf("New(negative latency) error = %v, want %v", err, capacity.ErrInvalidConfig)
+	}
+
+	latErr := errors.New("metrics unavailable")
+	ucLat, _ := capacity.New(fakeLister{vols: []capacity.ProviderVolume{{Provider: "p", Count: 10}}}, fakeLatency{err: latErr}, nil, capacity.Config{})
+	if _, err := ucLat.Check(context.Background()); !errors.Is(err, latErr) {
+		t.Errorf("Check(latency err) = %v, want %v", err, latErr)
+	}
+
+	emitErr := errors.New("stdout closed")
+	ucEmit, _ := capacity.New(fakeLister{vols: []capacity.ProviderVolume{{Provider: "p", Count: 10}}}, nil, &fakeEmitter{err: emitErr}, capacity.Config{})
+	if _, err := ucEmit.Check(context.Background()); !errors.Is(err, emitErr) {
+		t.Errorf("Check(emitter err) = %v, want %v", err, emitErr)
+	}
+
+	var buf bytes.Buffer
+	emf := capacity.NewEMFEmitter(&buf, "", nil)
+	if err := emf.EmitProviderOverCapacity(context.Background(), capacity.ProviderReport{
+		Provider:     "ok-prov",
+		OverCapacity: false,
+	}); err != nil {
+		t.Fatalf("EmitProviderOverCapacity(healthy): %v", err)
+	}
+	var ev map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &ev); err != nil {
+		t.Fatalf("unmarshal healthy EMF: %v", err)
+	}
+	if ev[capacity.MetricProviderOverCapacity] != float64(0) {
+		t.Errorf("healthy ProviderOverCapacity = %v, want 0", ev[capacity.MetricProviderOverCapacity])
+	}
 }

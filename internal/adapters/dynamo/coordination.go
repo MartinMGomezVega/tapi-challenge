@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
 	"github.com/martingomezvega/tapi-challenge/internal/app/assignslots"
+	"github.com/martingomezvega/tapi-challenge/internal/app/capacity"
 	"github.com/martingomezvega/tapi-challenge/internal/domain"
 )
 
@@ -103,6 +104,22 @@ func (r *CoordinationRepo) ListProviders(ctx context.Context) ([]assignslots.Pro
 		return strings.Compare(a.Provider, b.Provider)
 	})
 	return states, nil
+}
+
+// ListProviderVolumes adapts ListProviders to satisfy capacity.ProviderLister (001-US3).
+func (r *CoordinationRepo) ListProviderVolumes(ctx context.Context) ([]capacity.ProviderVolume, error) {
+	states, err := r.ListProviders(ctx)
+	if err != nil {
+		return nil, err
+	}
+	vols := make([]capacity.ProviderVolume, len(states))
+	for i, st := range states {
+		vols[i] = capacity.ProviderVolume{
+			Provider: st.Provider,
+			Count:    st.Count,
+		}
+	}
+	return vols, nil
 }
 
 // SaveProviderState upserts a provider's registry entry (count, histogram, backfill status).
