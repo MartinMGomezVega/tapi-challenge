@@ -49,9 +49,9 @@ func TestQueue_SendBatch_FIFO_Integration(t *testing.T) {
 	}
 
 	out, err := env.SQS.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
-		QueueUrl:              aws.String(qURL),
-		MaxNumberOfMessages:   10,
-		WaitTimeSeconds:       2,
+		QueueUrl:            aws.String(qURL),
+		MaxNumberOfMessages: 10,
+		WaitTimeSeconds:     2,
 		MessageSystemAttributeNames: []sqstypes.MessageSystemAttributeName{
 			sqstypes.MessageSystemAttributeNameMessageGroupId,
 			sqstypes.MessageSystemAttributeNameMessageDeduplicationId,
