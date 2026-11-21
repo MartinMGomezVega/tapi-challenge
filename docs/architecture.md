@@ -162,7 +162,8 @@ xychart-beta
 **Riesgo residual documentado**: si el worker cae después de que la API respondió y antes de persistir, la llamada se repite. Sólo la capa 4 lo evita, y depende de que la API interna respete la clave (pregunta abierta para Tapi).
 
 ### ADR-006 — Reintentos: en proceso + visibility timeout + DLQ
-Reintentos cortos en proceso (máximo 2, menos de 5 s) para errores transitorios rápidos. Después, `ChangeMessageVisibility` con backoff exponencial y jitter (30 s → 15 min). Con `maxReceiveCount = 6`, el mensaje va a la DLQ y queda `FAILED_EXHAUSTED`. Circuit breaker por proveedor.
+Reintentos cortos en proceso (máximo 2, solo errores transitorios rápidos < 1 s, delay 200 ms–1 s con jitter). Después, `ChangeMessageVisibility` con backoff exponencial acotado en `[30 s, 15 min]` y jitter ±20 % (respetando `Retry-After` hasta 15 min). Con `maxReceiveCount = 6`, el mensaje pasa a la DLQ FIFO y la ejecución queda en `FAILED_EXHAUSTED` antes de la derivación. Circuit breaker local por proveedor (ventana deslizante de 20, umbral ≥ 50 %, cooldown 60 s).
+**Evidencia E2E (`004-errores-y-reintentos`)**: validado contra LocalStack FIFO (`TestWorker_LocalStack_RetriesExhaustionIsolationAndRedrive`): un proveedor con 100 % 503 agota las 6 entregas, queda `FAILED_EXHAUSTED` y entra a la DLQ mientras los proveedores sanos completan el 100 % sin degradación (SC-002); un HTTP 400 termina `FAILED_PERMANENT` con 0 reintentos (SC-004); `cmd/redrive` re-encola desde la DLQ preservando `MessageGroupId`, `MessageDeduplicationId` y `attempts`.
 
 ### ADR-007 — Go + Clean Architecture + Terraform
 Go por su concurrencia nativa, binarios estáticos chicos (imágenes *distroless* de ~15 MB), bajo consumo de memoria y el AWS SDK v2. Terraform como IaC por ser estándar de la industria y multi-entorno.
