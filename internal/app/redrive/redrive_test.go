@@ -85,3 +85,62 @@ func TestRedrive_FiltersByProviderAndSince(t *testing.T) {
 		t.Fatalf("deleted = %v", dlq.deleted)
 	}
 }
+
+type errDLQ struct {
+	recvErr error
+	delErr  error
+	msgs    []redrive.DLQMessage
+}
+
+func (e *errDLQ) ReceiveBatch(_ context.Context, _ int) ([]redrive.DLQMessage, error) {
+	if e.recvErr != nil {
+		return nil, e.recvErr
+	}
+	out := e.msgs
+	e.msgs = nil
+	return out, nil
+}
+func (e *errDLQ) Delete(_ context.Context, _ string) error { return e.delErr }
+
+type errSender struct{ err error }
+
+func (e errSender) Send(_ context.Context, _ redrive.DLQMessage) error { return e.err }
+
+type errResetter struct{ err error }
+
+func (e errResetter) ResetForRedrive(_ context.Context, _ string, _ domain.RunDate, _ time.Time) error {
+	return e.err
+}
+
+func TestRedrive_DryRunMaxCountAndErrors(t *testing.T) {
+	t.Parallel()
+
+	sample := []redrive.DLQMessage{
+		{RequestID: "r1", RunDate: "2026-11-21", Provider: "edenor", ReceiptHandle: "rh-1"},
+		{RequestID: "r2", RunDate: "2026-11-21", Provider: "edenor", ReceiptHandle: "rh-2"},
+	}
+
+	// DryRun + MaxCount=1
+	dlq := &fakeDLQ{batches: [][]redrive.DLQMessage{sample}}
+	sender := &fakeSender{}
+	resetter := &fakeResetter{}
+	uc := redrive.New(dlq, sender, resetter, nil)
+	rep, err := uc.Run(context.Background(), redrive.Filter{DryRun: true, MaxCount: 1})
+	if err != nil || rep.Redriven != 1 || len(sender.sent) != 0 || len(resetter.reset) != 0 || len(dlq.deleted) != 0 {
+		t.Fatalf("dryrun/maxcount mismatch: rep=%+v err=%v", rep, err)
+	}
+
+	// Error paths
+	if _, err := redrive.New(&errDLQ{recvErr: context.Canceled}, errSender{}, errResetter{}, nil).Run(context.Background(), redrive.Filter{}); err == nil {
+		t.Fatalf("expected receive error")
+	}
+	if _, err := redrive.New(&errDLQ{msgs: sample}, errSender{}, errResetter{err: context.Canceled}, nil).Run(context.Background(), redrive.Filter{}); err == nil {
+		t.Fatalf("expected reset error")
+	}
+	if _, err := redrive.New(&errDLQ{msgs: sample}, errSender{err: context.Canceled}, errResetter{}, nil).Run(context.Background(), redrive.Filter{}); err == nil {
+		t.Fatalf("expected send error")
+	}
+	if _, err := redrive.New(&errDLQ{msgs: sample, delErr: context.Canceled}, errSender{}, errResetter{}, nil).Run(context.Background(), redrive.Filter{}); err == nil {
+		t.Fatalf("expected delete error")
+	}
+}
