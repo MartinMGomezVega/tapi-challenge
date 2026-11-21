@@ -140,6 +140,60 @@ func (r *RequestsRepo) Put(ctx context.Context, req domain.Request) error {
 	return nil
 }
 
+// PutBatch writes up to 25 requests per DynamoDB BatchWriteItem call, retrying unprocessed items.
+func (r *RequestsRepo) PutBatch(ctx context.Context, reqs []domain.Request) error {
+	const maxBatch = 25
+	for start := 0; start < len(reqs); start += maxBatch {
+		end := min(start+maxBatch, len(reqs))
+		writes := make([]types.WriteRequest, 0, end-start)
+		for _, req := range reqs[start:end] {
+			item := requestItem{
+				ID:         req.ID,
+				Provider:   req.Provider,
+				ProviderID: req.ProviderID(),
+				Endpoint:   req.Endpoint,
+				Method:     req.Method,
+				Body:       req.Body,
+				Enabled:    req.Enabled,
+				Slot:       req.Slot,
+				Shard:      req.Shard,
+				Version:    req.Version,
+				CreatedAt:  req.CreatedAt.UTC().Format(time.RFC3339Nano),
+				UpdatedAt:  req.UpdatedAt.UTC().Format(time.RFC3339Nano),
+			}
+			if req.Slot >= 0 && req.Shard >= 0 {
+				item.SlotShard = req.SlotShard()
+			}
+			av, err := attributevalue.MarshalMap(item)
+			if err != nil {
+				return fmt.Errorf("marshal request %s: %w", req.ID, err)
+			}
+			writes = append(writes, types.WriteRequest{
+				PutRequest: &types.PutRequest{Item: av},
+			})
+		}
+
+		pending := map[string][]types.WriteRequest{r.tableName: writes}
+		for len(pending[r.tableName]) > 0 {
+			out, err := r.client.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{
+				RequestItems: pending,
+			})
+			if err != nil {
+				return fmt.Errorf("batch write requests: %w", err)
+			}
+			pending = out.UnprocessedItems
+			if len(pending[r.tableName]) > 0 {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(20 * time.Millisecond):
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // Get retrieves a full Request by its primary key id using a strongly consistent read.
 func (r *RequestsRepo) Get(ctx context.Context, id string) (domain.Request, error) {
 	if strings.TrimSpace(id) == "" {
