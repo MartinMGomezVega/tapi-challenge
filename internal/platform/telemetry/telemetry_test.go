@@ -91,3 +91,25 @@ func TestTraceParent_RoundTrip(t *testing.T) {
 		t.Fatalf("extracted traceID = %q, want %q", extractedID, traceID)
 	}
 }
+
+func TestWorkerAndReconcilerMetricsEMF(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	ts := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	em := telemetry.NewEMFEmitter(&buf, telemetry.DefaultNamespace)
+	wm := telemetry.NewWorkerMetrics(em, func() time.Time { return ts })
+	wm.RecordExecution("edenor", domain.StatusFailedPermanent, "AUTH", 25*time.Millisecond)
+	wm.RecordBreakerOpen("edenor", true)
+
+	rm := telemetry.NewReconcilerMetrics(em, func() time.Time { return ts })
+	rm.RecordReconcile(domain.RunDate("2026-11-21"), 0.9995, 1, 2)
+	rm.RecordProviderOverCapacity("edenor", true)
+
+	out := buf.String()
+	for _, want := range []string{"ExecutionsByStatus", "ProviderLatency", "ExecutionFailed", "BreakerOpen", "DailyCoverage", "MissingExecutions", "ProviderOverCapacity"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing metric %q in EMF output: %s", want, out)
+		}
+	}
+}
