@@ -12,6 +12,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.74.1
 	github.com/testcontainers/testcontainers-go v0.45.0
 	github.com/testcontainers/testcontainers-go/modules/localstack v0.45.0
+	golang.org/x/sync v0.25.0
+	golang.org/x/time v0.16.0
 	pgregory.net/rapid v1.3.0
 )
 
