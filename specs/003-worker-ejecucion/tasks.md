@@ -3,10 +3,10 @@
 **Input**: [spec.md](./spec.md), [plan.md](./plan.md) · TDD obligatorio · `go test -race` en todo.
 
 ## Fase 1: Fundacional
-- [ ] T001 Test table-driven: transiciones válidas e inválidas de `ExecutionStatus` → `internal/domain/execution_test.go`
-- [ ] T002 Implementar la máquina de estados pura
-- [ ] T003 [P] `test/mockapi`: servidor Go con latencia configurable, inyección de errores (5xx, 429, timeout, 4xx) y métrica `max_inflight[provider]`
-- [ ] T004 [P] Crear la tabla `executions` + GSI `gsi_run_date_status` en el script de LocalStack
+- [x] T001 Test table-driven: transiciones válidas e inválidas de `ExecutionStatus` → `internal/domain/execution_test.go`
+- [x] T002 Implementar la máquina de estados pura
+- [x] T003 [P] `test/mockapi`: servidor Go con latencia configurable, inyección de errores (5xx, 429, timeout, 4xx) y métrica `max_inflight[provider]`
+- [x] T004 [P] Crear la tabla `executions` + GSI `gsi_run_date_status` en el script de LocalStack
 
 ## Fase 2: US1 — Ejecutar y guardar (P1) 🎯
 - [ ] T005 [US1] Test: `ExecuteRequest` éxito → `Acquire` → `Call` → `Complete` → `Ack` (fakes)

@@ -14,6 +14,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/testcontainers/testcontainers-go"
@@ -33,6 +35,7 @@ type Env struct {
 	AWSConfig aws.Config
 	DynamoDB  *dynamodb.Client
 	SQS       *sqs.Client
+	S3        *s3.Client
 }
 
 // StartLocalStack starts a LocalStack container with DynamoDB, SQS, and S3 enabled
@@ -90,6 +93,10 @@ func StartLocalStack(t testing.TB) *Env {
 	sqsClient := sqs.NewFromConfig(cfg, func(o *sqs.Options) {
 		o.BaseEndpoint = aws.String(endpoint)
 	})
+	s3Client := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(endpoint)
+		o.UsePathStyle = true
+	})
 
 	return &Env{
 		Container: container,
@@ -97,6 +104,7 @@ func StartLocalStack(t testing.TB) *Env {
 		AWSConfig: cfg,
 		DynamoDB:  ddb,
 		SQS:       sqsClient,
+		S3:        s3Client,
 	}
 }
 
@@ -271,4 +279,19 @@ func (e *Env) EnsureFIFOQueue(ctx context.Context, queueName, dlqName string) (q
 		return "", "", fmt.Errorf("create fifo queue %q: %w", queueName, err)
 	}
 	return aws.ToString(qOut.QueueUrl), dlqURL, nil
+}
+
+// EnsureBucket idempotently creates an S3 bucket in LocalStack.
+func (e *Env) EnsureBucket(ctx context.Context, bucket string) error {
+	_, err := e.S3.CreateBucket(ctx, &s3.CreateBucketInput{
+		Bucket: aws.String(bucket),
+	})
+	if err != nil {
+		var owned *s3types.BucketAlreadyOwnedByYou
+		var exists *s3types.BucketAlreadyExists
+		if !errors.As(err, &owned) && !errors.As(err, &exists) {
+			return fmt.Errorf("create s3 bucket %q: %w", bucket, err)
+		}
+	}
+	return nil
 }
