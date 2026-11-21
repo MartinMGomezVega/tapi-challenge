@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go-quality-and-tests:
+    name: Go Lint, Security & Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+
+      - name: go vet
+        run: go vet -tags=integration ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          args: --build-tags=integration
+
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck -tags=integration ./...
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      - name: Unit tests (-race) and >= 90% domain/app coverage gate
+        run: |
+          make test
+          make cover
+
+  integration-localstack:
+    name: LocalStack Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run LocalStack integration tests
+        run: make it
+
+  docker-and-trivy:
+    name: Build ARM64 Images & Trivy Scan
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [dispatcher, worker, reconciler]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image (${{ matrix.service }})
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: build/${{ matrix.service }}.Dockerfile
+          platforms: linux/arm64
+          load: false
+          tags: tapi-${{ matrix.service }}:${{ github.sha }}
+          outputs: type=docker,dest=/tmp/${{ matrix.service }}.tar
+      - name: Trivy vulnerability scan (fail on CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          input: /tmp/${{ matrix.service }}.tar
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+
+  terraform-validate-and-security:
+    name: Terraform Validate, Test, TFLint & Checkov
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.11.4"
+
+      - name: terraform fmt check
+        run: terraform fmt -check -recursive deploy/terraform
+
+      - name: terraform validate & mock tests
+        run: |
+          for dir in deploy/terraform/modules/data deploy/terraform/modules/messaging deploy/terraform/stack deploy/terraform/envs/dev deploy/terraform/envs/staging deploy/terraform/envs/prod; do
+            terraform -chdir="$dir" init -backend=false -input=false
+            terraform -chdir="$dir" validate
+          done
+          terraform -chdir=deploy/terraform/modules/data test
+          terraform -chdir=deploy/terraform/modules/messaging test
+          terraform -chdir=deploy/terraform/stack test
+
+      - name: tflint
+        uses: terraform-linters/setup-tflint@v4
+      - run: |
+          tflint --init
+          tflint --recursive --chdir=deploy/terraform
+
+      - name: Checkov IaC security scan
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: deploy/terraform
+          framework: terraform
+          soft_fail: false
+          skip_check: CKV_AWS_144,CKV_AWS_18,CKV2_AWS_62

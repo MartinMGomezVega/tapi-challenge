@@ -10,6 +10,10 @@ Sistema que ejecuta **una consulta diaria por cada registro** de una tabla de N 
 |---|---|
 | [Constitución](specs/constitution.md) | Principios no negociables del proyecto |
 | [Arquitectura](docs/architecture.md) | Trazabilidad al enunciado, diagramas, capacidad, ADRs, alta disponibilidad y DR, supuestos |
+| [Diagrama de arquitectura (SVG)](docs/architecture-diagram.svg) | Vista consolidada VPC privada sin NAT + servicios AWS |
+| [Costos mensuales (1M / 10M / 100M)](docs/costs.md) | Estimación mensual detallada y palancas de optimización |
+| [Análisis de modos de falla (FMEA)](docs/failure-modes.md) | Modos de falla, detección, mitigación y runbooks |
+| [Reporte final de trazabilidad](docs/evidence/final-report.md) | Matriz R/C/T → FR → test → evidencia y estado de todos los SC |
 | [006 · plan](specs/006-infraestructura-y-delivery/plan.md) | Ciclo de vida de desarrollo (SDLC) |
 
 ## Features (SDD)

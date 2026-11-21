@@ -42,5 +42,14 @@ bench:
 	go test -bench='Benchmark(Assign1M|StreamingBackfill1M|StreamingBackfill4M)' -benchmem -run='^$$' ./internal/domain/...
 
 demo:
-	@echo "make demo will be enabled once mockapi, dispatcher, worker, and seed are wired in M1/M2 (006-T004)."
-	@exit 1
+	chmod +x scripts/demo.sh
+	./scripts/demo.sh
+
+tf-validate:
+	terraform fmt -check -recursive deploy/terraform
+	for dir in deploy/terraform/modules/data deploy/terraform/modules/messaging deploy/terraform/stack deploy/terraform/envs/dev deploy/terraform/envs/staging deploy/terraform/envs/prod; do \
+		terraform -chdir="$$dir" init -backend=false -input=false && terraform -chdir="$$dir" validate || exit 1; \
+	done
+	terraform -chdir=deploy/terraform/modules/data test
+	terraform -chdir=deploy/terraform/modules/messaging test
+	terraform -chdir=deploy/terraform/stack test

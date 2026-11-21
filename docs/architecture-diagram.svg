@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="580" viewBox="0 0 1120 580" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#334155"/>
+    </marker>
+    <style>
+      .title { font-size: 18px; font-weight: 700; fill: #0f172a; }
+      .sub { font-size: 12px; fill: #475569; }
+      .box { rx: 10; ry: 10; stroke-width: 1.5; }
+      .lbl { font-size: 13px; font-weight: 600; fill: #0f172a; }
+      .desc { font-size: 11px; fill: #334155; }
+      .zone { fill: #f8fafc; stroke: #94a3b8; stroke-dasharray: 6 4; rx: 12; }
+      .edge { stroke: #334155; stroke-width: 1.6; fill: none; marker-end: url(#arrow); }
+      .elbl { font-size: 10px; fill: #475569; font-weight: 500; }
+    </style>
+  </defs>
+
+  <rect width="1120" height="580" fill="#ffffff"/>
+  <text x="28" y="34" class="title">Tapi Scheduled Provider Queries — AWS Private Architecture (Single Account &amp; Region, No NAT)</text>
+  <text x="28" y="54" class="sub">Invariants: 1 inflight/provider (SQS FIFO + Lease) · 1 exec/request/day (4-layer idempotency) · Uniform 1440-slot distribution · Lambda budget k×t ≤ Q/2</text>
+
+  <!-- Private VPC Zone -->
+  <rect x="24" y="72" width="1072" height="486" class="zone"/>
+  <text x="40" y="96" class="lbl">Private VPC (3 AZs, Private Subnets Only · Zero NAT · Gateway &amp; Interface VPC Endpoints · KMS CMK)</text>
+
+  <!-- DynamoDB Data Layer -->
+  <rect x="52" y="122" width="210" height="86" class="box" fill="#eff6ff" stroke="#2563eb"/>
+  <text x="68" y="146" class="lbl">DynamoDB: requests</text>
+  <text x="68" y="164" class="desc">PK: id · GSI gsi_slot_shard</text>
+  <text x="68" y="180" class="desc">GSI gsi_provider (streaming backfill)</text>
+  <text x="68" y="196" class="desc">On-Demand · PITR · KMS</text>
+
+  <rect x="52" y="232" width="210" height="86" class="box" fill="#eff6ff" stroke="#2563eb"/>
+  <text x="68" y="256" class="lbl">DynamoDB: coordination</text>
+  <text x="68" y="274" class="desc">Leader Lease + Fencing Version</text>
+  <text x="68" y="290" class="desc">Watermark (run_date, last_slot)</text>
+  <text x="68" y="306" class="desc">Provider Histograms &amp; Checkpoints</text>
+
+  <rect x="52" y="342" width="210" height="92" class="box" fill="#eff6ff" stroke="#2563eb"/>
+  <text x="68" y="366" class="lbl">DynamoDB: executions</text>
+  <text x="68" y="384" class="desc">PK: request_id · SK: run_date</text>
+  <text x="68" y="400" class="desc">GSI gsi_run_date_status · TTL 90d</text>
+  <text x="68" y="416" class="desc">Conditional Acquire / Lease / Result</text>
+
+  <rect x="52" y="454" width="210" height="76" class="box" fill="#ecfdf5" stroke="#059669"/>
+  <text x="68" y="478" class="lbl">S3: tapi-results (KMS + TLS)</text>
+  <text x="68" y="496" class="desc">results/ (&gt;350 KB payloads)</text>
+  <text x="68" y="512" class="desc">reports/ JSON+CSV (Athena/Glue)</text>
+
+  <!-- Dispatcher -->
+  <rect x="328" y="140" width="210" height="114" class="box" fill="#fefce8" stroke="#ca8a04"/>
+  <text x="344" y="164" class="lbl">ECS Fargate: dispatcher (×2)</text>
+  <text x="344" y="182" class="desc">ARM64 · Leader Election (30s lease)</text>
+  <text x="344" y="198" class="desc">Minute ticker + catch-up + orphans</text>
+  <text x="344" y="214" class="desc">Parallel shard queries (errgroup)</text>
+  <text x="344" y="230" class="desc">Circuit Breaker + Rollback</text>
+
+  <!-- SQS FIFO + DLQ -->
+  <rect x="598" y="140" width="220" height="92" class="box" fill="#fdf2f8" stroke="#db2777"/>
+  <text x="614" y="164" class="lbl">SQS FIFO: tapi-jobs.fifo</text>
+  <text x="614" y="182" class="desc">MessageGroupId = provider</text>
+  <text x="614" y="198" class="desc">DedupId = request_id#run_date</text>
+  <text x="614" y="214" class="desc">High-Throughput · VT 60s · KMS</text>
+
+  <rect x="598" y="256" width="220" height="68" class="box" fill="#fef2f2" stroke="#dc2626"/>
+  <text x="614" y="280" class="lbl">SQS FIFO DLQ (maxReceive=6)</text>
+  <text x="614" y="298" class="desc">FAILED_EXHAUSTED · cmd/redrive</text>
+  <text x="614" y="314" class="desc">Alarm &gt; 0 → Runbook dlq.md</text>
+
+  <!-- Worker -->
+  <rect x="598" y="352" width="220" height="126" class="box" fill="#fefce8" stroke="#ca8a04"/>
+  <text x="614" y="376" class="lbl">ECS Fargate: worker (Autoscale)</text>
+  <text x="614" y="394" class="desc">ARM64 · Pre-acquired semaphore k</text>
+  <text x="614" y="410" class="desc">Sequential per MessageGroupId</text>
+  <text x="614" y="426" class="desc">RetryPolicy + ProviderBreaker</text>
+  <text x="614" y="442" class="desc">Visibility heartbeat VT/2 · SIGTERM</text>
+  <text x="614" y="458" class="desc">k × MAX_TASKS ≤ LAMBDA_BUDGET/2</text>
+
+  <!-- Private Internal API Gateway -->
+  <rect x="876" y="352" width="196" height="126" class="box" fill="#f3e8ff" stroke="#7c3aed"/>
+  <text x="892" y="376" class="lbl">Internal API Gateway</text>
+  <text x="892" y="394" class="desc">Private VPCE (execute-api)</text>
+  <text x="892" y="410" class="desc">SigV4 + aws:SourceVpce</text>
+  <text x="892" y="426" class="desc">Idempotency-Key + traceparent</text>
+  <text x="892" y="442" class="desc">2× Lambdas per call (C3)</text>
+  <text x="892" y="458" class="desc">Timeout 25s (&lt; APIGW 29s)</text>
+
+  <!-- Reconciler + Observability -->
+  <rect x="328" y="352" width="210" height="96" class="box" fill="#f0f9ff" stroke="#0284c7"/>
+  <text x="344" y="376" class="lbl">ECS Task: reconciler (00:30)</text>
+  <text x="344" y="394" class="desc">EventBridge Scheduler daily</text>
+  <text x="344" y="410" class="desc">1440×S GSI + BatchGetItem</text>
+  <text x="344" y="426" class="desc">Idempotent re-dispatch + Capacity</text>
+
+  <rect x="876" y="140" width="196" height="114" class="box" fill="#f1f5f9" stroke="#475569"/>
+  <text x="892" y="164" class="lbl">Observability &amp; Alerts</text>
+  <text x="892" y="182" class="desc">slog JSON (no PII) · OTel/X-Ray</text>
+  <text x="892" y="198" class="desc">CloudWatch EMF Metrics</text>
+  <text x="892" y="214" class="desc">7 Alarms + SNS + Dashboard</text>
+  <text x="892" y="230" class="desc">7 Runbooks (docs/runbooks/)</text>
+
+  <!-- Arrows -->
+  <path d="M 262 165 L 328 175" class="edge"/>
+  <path d="M 262 270 L 328 220" class="edge"/>
+  <path d="M 390 254 L 262 365" class="edge"/>
+  <path d="M 538 186 L 598 186" class="edge"/>
+  <text x="546" y="178" class="elbl">Batch 10</text>
+  <path d="M 708 232 L 708 256" class="edge"/>
+  <path d="M 708 324 L 708 352" class="edge"/>
+  <path d="M 818 415 L 876 415" class="edge"/>
+  <text x="824" y="407" class="elbl">SigV4</text>
+  <path d="M 598 415 L 558 415 L 558 485 L 262 485" class="edge"/>
+  <text x="370" y="478" class="elbl">&gt;350 KB blobs / S3 reports</text>
+  <path d="M 598 390 L 558 390 L 558 340 L 262 390" class="edge"/>
+  <path d="M 328 395 L 262 395" class="edge"/>
+  <path d="M 433 352 L 598 205" class="edge"/>
+</svg>

@@ -16,3 +16,9 @@ coverage.html
 .DS_Store
 .idea/
 .vscode/
+
+# Terraform local cache & state
+**/.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
