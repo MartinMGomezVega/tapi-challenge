@@ -3,10 +3,10 @@
 **Input**: [spec.md](./spec.md), [plan.md](./plan.md) · TDD obligatorio.
 
 ## Fase 1: Fundacional (dominio de tiempo)
-- [ ] T001 Test: `SlotOf(now, tz)` devuelve `(run_date, slot)` correcto en UTC y en `America/Argentina/Buenos_Aires` → `internal/domain/slotclock_test.go`
-- [ ] T002 Test: `RangeSlots(from, to)` itera en orden e incluye el cruce de medianoche
+- [x] T001 Test: `SlotOf(now, tz)` devuelve `(run_date, slot)` correcto en UTC y en `America/Argentina/Buenos_Aires` → `internal/domain/slotclock_test.go`
+- [x] T002 Test: `RangeSlots(from, to)` itera en orden e incluye el cruce de medianoche
 - [ ] T003 Implementar `RunDate`, `SlotOf`, `RangeSlots`
-- [ ] T004 [P] Port `Clock` + `FakeClock` (avance manual) en `internal/platform/clock`
+- [x] T004 [P] Port `Clock` + `FakeClock` (avance manual) en `internal/platform/clock`
 
 ## Fase 2: US1 — Despacho del slot actual (P1) 🎯
 - [ ] T005 [US1] Test: `DispatchSlot` crea PENDING y envía un mensaje por registro habilitado (fakes)
