@@ -129,12 +129,12 @@ func (f *fakeExecutions) statusOf(reqID string, date domain.RunDate) string {
 }
 
 type fakeQueue struct {
-	mu             sync.Mutex
-	sent           []dispatch.JobMessage
-	batchSizes     []int
-	failOnceIDs    map[string]bool // fail first attempt for these request IDs (partial batch failure)
-	alwaysFail     bool
-	alwaysFailErr  error
+	mu            sync.Mutex
+	sent          []dispatch.JobMessage
+	batchSizes    []int
+	failOnceIDs   map[string]bool // fail first attempt for these request IDs (partial batch failure)
+	alwaysFail    bool
+	alwaysFailErr error
 }
 
 func newFakeQueue() *fakeQueue {
@@ -431,6 +431,9 @@ func TestTick_CatchUpMidnightAndFailureSafety(t *testing.T) {
 			msgs[8].RunDate != "2026-11-21" || msgs[8].Slot != 3 {
 			t.Errorf("midnight crossing messages mismatch: %+v", msgs)
 		}
+		if got := execs.statusOf("m-0", "2026-11-21"); got != dispatch.StatusEnqueued {
+			t.Errorf("m-0 status on 2026-11-21 = %q, want ENQUEUED", got)
+		}
 	})
 
 	t.Run("watermark does not advance when slot fails mid-way", func(t *testing.T) {
@@ -545,7 +548,7 @@ func TestEMFEmitter_DispatchMetrics(t *testing.T) {
 	ts := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
 	emitter := dispatch.NewEMFEmitter(&buf, "Tapi/Scheduler", clock.NewFake(ts))
 
-	if err := emitter.EmitDispatch(context.Background(), dispatch.DispatchMetrics{
+	if err := emitter.EmitDispatch(context.Background(), dispatch.Metrics{
 		SlotDispatchDuration: 120 * time.Millisecond,
 		RecordsDispatched:    694,
 		DispatchLagMinutes:   0,
@@ -562,5 +565,123 @@ func TestEMFEmitter_DispatchMetrics(t *testing.T) {
 		if _, ok := ev[field]; !ok {
 			t.Errorf("missing EMF metric field %q in %+v", field, ev)
 		}
+	}
+
+	buf.Reset()
+	if err := emitter.EmitDispatch(context.Background(), dispatch.Metrics{IsLeader: false}); err != nil {
+		t.Fatalf("EmitDispatch(standby): %v", err)
+	}
+}
+
+// SC-001 (unit fast verification): 1440 ticks across a full day dispatch 100% of records exactly once.
+func TestTick_FullDay1440Ticks_ExactlyOnce(t *testing.T) {
+	t.Parallel()
+
+	const (
+		totalRecords = 14_400
+		shards       = 4
+	)
+
+	assigner, _ := domain.NewSlotAssigner(shards)
+	reqs := newFakeRequests(50)
+	for i := range totalRecords {
+		prov := fmt.Sprintf("prov-%02d", i%20)
+		id := fmt.Sprintf("req-%06d", i)
+		assigned, err := assigner.Assign(prov, id, i/20, totalRecords/20)
+		if err != nil {
+			t.Fatalf("Assign: %v", err)
+		}
+		reqs.add(assigned.Slot, assigned.Shard, domain.RequestKey{ID: id, Provider: prov, Enabled: true})
+	}
+
+	execs := newFakeExecutions()
+	q := newFakeQueue()
+	coord := &fakeCoordination{}
+	var emfBuf bytes.Buffer
+	fc := clock.NewFake(time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC))
+	emf := dispatch.NewEMFEmitter(&emfBuf, "", fc)
+
+	uc, err := dispatch.New(reqs, execs, q, coord, coord, emf, fc, discardLogger(), dispatch.Config{
+		OwnerID: "disp-sim",
+		Shards:  shards,
+	})
+	if err != nil {
+		t.Fatalf("dispatch.New: %v", err)
+	}
+
+	totalSent := 0
+	for tick := range domain.SlotsPerDay {
+		if tick > 0 {
+			fc.Advance(time.Minute)
+		}
+		st, err := uc.Tick(context.Background())
+		if err != nil {
+			t.Fatalf("Tick(%d): %v", tick, err)
+		}
+		totalSent += st.RecordsSent
+	}
+
+	if totalSent != totalRecords {
+		t.Fatalf("totalSent = %d, want %d (100%%)", totalSent, totalRecords)
+	}
+	msgs := q.messages()
+	if len(msgs) != totalRecords {
+		t.Fatalf("queue messages = %d, want %d", len(msgs), totalRecords)
+	}
+	seen := make(map[string]bool, totalRecords)
+	for _, m := range msgs {
+		key := m.DedupID()
+		if seen[key] {
+			t.Fatalf("duplicate message dispatched: %s", key)
+		}
+		seen[key] = true
+	}
+
+	// Verify ReleaseLease clears leader ownership cleanly.
+	if err := uc.ReleaseLease(context.Background()); err != nil {
+		t.Fatalf("ReleaseLease: %v", err)
+	}
+}
+
+func TestUseCase_ValidationAndQueueFailure(t *testing.T) {
+	t.Parallel()
+
+	if _, err := dispatch.New(nil, nil, nil, nil, nil, nil, nil, nil, dispatch.Config{}); !errors.Is(err, dispatch.ErrInvalidConfig) {
+		t.Errorf("New(nil deps) err = %v, want %v", err, dispatch.ErrInvalidConfig)
+	}
+
+	q := newFakeQueue()
+	q.alwaysFail = true
+	q.alwaysFailErr = errors.New("sqs unavailable")
+	execs := newFakeExecutions()
+	fc := clock.NewFake(time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC))
+
+	uc, err := dispatch.New(newFakeRequests(10), execs, q, nil, nil, nil, fc, nil, dispatch.Config{MaxRetries: 1})
+	if err != nil {
+		t.Fatalf("New(): %v", err)
+	}
+	if err := uc.DispatchNow(context.Background(), "r-fail", "p"); !errors.Is(err, q.alwaysFailErr) {
+		t.Errorf("DispatchNow(sqs fail) err = %v, want %v", err, q.alwaysFailErr)
+	}
+	if _, err := uc.Tick(context.Background()); !errors.Is(err, dispatch.ErrInvalidConfig) {
+		t.Errorf("Tick(nil lease) err = %v, want %v", err, dispatch.ErrInvalidConfig)
+	}
+	if err := uc.ReleaseLease(context.Background()); err != nil {
+		t.Errorf("ReleaseLease(nil lease) err = %v, want nil", err)
+	}
+	if _, err := uc.DispatchSlot(context.Background(), domain.SlotCoord{Date: "2026-11-20", Slot: 9999}); !errors.Is(err, domain.ErrInvalidSlot) {
+		t.Errorf("DispatchSlot(invalid slot) err = %v, want %v", err, domain.ErrInvalidSlot)
+	}
+	ucNoReq, _ := dispatch.New(nil, execs, newFakeQueue(), nil, nil, nil, fc, discardLogger(), dispatch.Config{})
+	if _, err := ucNoReq.DispatchSlot(context.Background(), domain.SlotCoord{Date: "2026-11-20", Slot: 1}); !errors.Is(err, dispatch.ErrInvalidConfig) {
+		t.Errorf("DispatchSlot(nil reader) err = %v, want %v", err, dispatch.ErrInvalidConfig)
+	}
+
+	// Up-to-date watermark: Tick returns IsLeader=true, 0 slots dispatched.
+	coord := &fakeCoordination{hasWM: true, wm: domain.SlotCoord{Date: "2026-11-20", Slot: 0}}
+	ucUpToDate, _ := dispatch.New(newFakeRequests(10), execs, newFakeQueue(), coord, coord, nil, fc, discardLogger(), dispatch.Config{OwnerID: "d-idle", Shards: 1})
+	st, err := ucUpToDate.Tick(context.Background())
+	if err != nil || !st.IsLeader || st.SlotsDispatched != 0 {
+		t.Errorf("Tick(up-to-date) = (%+v, %v), want leader with 0 slots", st, err)
 	}
 }

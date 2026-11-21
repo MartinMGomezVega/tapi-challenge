@@ -85,8 +85,8 @@ type WatermarkStore interface {
 	Advance(ctx context.Context, coord domain.SlotCoord, fencingToken int64, now time.Time) error
 }
 
-// DispatchMetrics carries FR-007 CloudWatch EMF metrics for a dispatch tick/slot.
-type DispatchMetrics struct {
+// Metrics carries FR-007 CloudWatch EMF metrics for a dispatch tick/slot.
+type Metrics struct {
 	SlotDispatchDuration time.Duration
 	RecordsDispatched    int
 	DispatchLagMinutes   int
@@ -95,5 +95,5 @@ type DispatchMetrics struct {
 
 // MetricEmitter emits dispatcher EMF metrics (FR-007).
 type MetricEmitter interface {
-	EmitDispatch(ctx context.Context, m DispatchMetrics) error
+	EmitDispatch(ctx context.Context, m Metrics) error
 }
