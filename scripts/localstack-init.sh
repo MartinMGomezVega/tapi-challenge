@@ -15,6 +15,7 @@ if ! aws_cmd dynamodb describe-table --table-name requests >/dev/null 2>&1; then
     --billing-mode PAY_PER_REQUEST \
     --attribute-definitions \
       AttributeName=id,AttributeType=S \
+      AttributeName=provider,AttributeType=S \
       AttributeName=slot_shard,AttributeType=S \
       AttributeName=provider_id,AttributeType=S \
     --key-schema \
@@ -29,6 +30,17 @@ if ! aws_cmd dynamodb describe-table --table-name requests >/dev/null 2>&1; then
         "Projection": {
           "ProjectionType": "INCLUDE",
           "NonKeyAttributes": ["provider", "enabled", "created_at"]
+        }
+      },
+      {
+        "IndexName": "gsi_provider",
+        "KeySchema": [
+          {"AttributeName": "provider", "KeyType": "HASH"},
+          {"AttributeName": "id", "KeyType": "RANGE"}
+        ],
+        "Projection": {
+          "ProjectionType": "INCLUDE",
+          "NonKeyAttributes": ["version", "slot", "shard", "enabled"]
         }
       }
     ]' >/dev/null

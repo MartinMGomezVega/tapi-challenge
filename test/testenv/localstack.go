@@ -94,13 +94,14 @@ func StartLocalStack(t testing.TB) *Env {
 }
 
 // EnsureRequestsTable idempotently creates the requests table with gsi_slot_shard
-// matching scripts/localstack-init.sh and waits until it is active.
+// and gsi_provider matching scripts/localstack-init.sh and waits until it is active.
 func (e *Env) EnsureRequestsTable(ctx context.Context, tableName string) error {
 	_, err := e.DynamoDB.CreateTable(ctx, &dynamodb.CreateTableInput{
 		TableName:   aws.String(tableName),
 		BillingMode: types.BillingModePayPerRequest,
 		AttributeDefinitions: []types.AttributeDefinition{
 			{AttributeName: aws.String("id"), AttributeType: types.ScalarAttributeTypeS},
+			{AttributeName: aws.String("provider"), AttributeType: types.ScalarAttributeTypeS},
 			{AttributeName: aws.String("slot_shard"), AttributeType: types.ScalarAttributeTypeS},
 			{AttributeName: aws.String("provider_id"), AttributeType: types.ScalarAttributeTypeS},
 		},
@@ -119,6 +120,17 @@ func (e *Env) EnsureRequestsTable(ctx context.Context, tableName string) error {
 					NonKeyAttributes: []string{"provider", "enabled", "created_at"},
 				},
 			},
+			{
+				IndexName: aws.String("gsi_provider"),
+				KeySchema: []types.KeySchemaElement{
+					{AttributeName: aws.String("provider"), KeyType: types.KeyTypeHash},
+					{AttributeName: aws.String("id"), KeyType: types.KeyTypeRange},
+				},
+				Projection: &types.Projection{
+					ProjectionType:   types.ProjectionTypeInclude,
+					NonKeyAttributes: []string{"version", "slot", "shard", "enabled"},
+				},
+			},
 		},
 	})
 	if err != nil {
@@ -133,6 +145,35 @@ func (e *Env) EnsureRequestsTable(ctx context.Context, tableName string) error {
 		TableName: aws.String(tableName),
 	}, 30*time.Second); err != nil {
 		return fmt.Errorf("wait for requests table %q: %w", tableName, err)
+	}
+	return nil
+}
+
+// EnsureCoordinationTable idempotently creates the coordination table matching
+// scripts/localstack-init.sh and waits until it is active.
+func (e *Env) EnsureCoordinationTable(ctx context.Context, tableName string) error {
+	_, err := e.DynamoDB.CreateTable(ctx, &dynamodb.CreateTableInput{
+		TableName:   aws.String(tableName),
+		BillingMode: types.BillingModePayPerRequest,
+		AttributeDefinitions: []types.AttributeDefinition{
+			{AttributeName: aws.String("name"), AttributeType: types.ScalarAttributeTypeS},
+		},
+		KeySchema: []types.KeySchemaElement{
+			{AttributeName: aws.String("name"), KeyType: types.KeyTypeHash},
+		},
+	})
+	if err != nil {
+		var inUse *types.ResourceInUseException
+		if !errors.As(err, &inUse) {
+			return fmt.Errorf("create coordination table %q: %w", tableName, err)
+		}
+	}
+
+	waiter := dynamodb.NewTableExistsWaiter(e.DynamoDB)
+	if err := waiter.Wait(ctx, &dynamodb.DescribeTableInput{
+		TableName: aws.String(tableName),
+	}, 30*time.Second); err != nil {
+		return fmt.Errorf("wait for coordination table %q: %w", tableName, err)
 	}
 	return nil
 }
