@@ -24,10 +24,11 @@ import (
 	"github.com/martingomezvega/tapi-challenge/internal/adapters/sqsq"
 	"github.com/martingomezvega/tapi-challenge/internal/app/dispatch"
 	"github.com/martingomezvega/tapi-challenge/internal/platform/clock"
+	"github.com/martingomezvega/tapi-challenge/internal/platform/telemetry"
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := telemetry.NewLogger(os.Stdout, "dispatcher")
 	if err := run(logger); err != nil {
 		logger.Error("dispatcher exited with error", slog.String("error", err.Error()))
 		os.Exit(1)

@@ -28,10 +28,11 @@ import (
 	"github.com/martingomezvega/tapi-challenge/internal/app/execute"
 	"github.com/martingomezvega/tapi-challenge/internal/domain"
 	"github.com/martingomezvega/tapi-challenge/internal/platform/clock"
+	"github.com/martingomezvega/tapi-challenge/internal/platform/telemetry"
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := telemetry.NewLogger(os.Stdout, "worker")
 	if err := run(logger); err != nil {
 		logger.Error("worker exited with error", "error", err)
 		os.Exit(1)
@@ -48,6 +49,7 @@ func run(logger *slog.Logger) error {
 	executionsTable := envOr("EXECUTIONS_TABLE", "executions")
 	resultsBucket := envOr("RESULTS_BUCKET", "tapi-results")
 	queueURL := os.Getenv("JOBS_QUEUE_URL")
+	queueName := envOr("JOBS_QUEUE_NAME", "tapi-jobs.fifo")
 	apiBaseURL := os.Getenv("PROVIDER_API_BASE_URL")
 	healthAddr := envOr("HEALTH_ADDR", ":8081")
 
@@ -64,9 +66,6 @@ func run(logger *slog.Logger) error {
 	// Fail-fast global concurrency budget check (003 US4).
 	if err := execute.ValidateConcurrencyBudget(inflightPerTask, maxTasks, lambdaBudget); err != nil {
 		return err
-	}
-	if queueURL == "" {
-		return errors.New("JOBS_QUEUE_URL is required")
 	}
 	if apiBaseURL == "" {
 		return errors.New("PROVIDER_API_BASE_URL is required")
@@ -98,6 +97,13 @@ func run(logger *slog.Logger) error {
 			o.BaseEndpoint = aws.String(endpoint)
 		}
 	})
+	if queueURL == "" {
+		out, err := sqsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: aws.String(queueName)})
+		if err != nil {
+			return fmt.Errorf("resolve queue URL for %q: %w", queueName, err)
+		}
+		queueURL = aws.ToString(out.QueueUrl)
+	}
 	s3Client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
 		if endpoint != "" {
 			o.BaseEndpoint = aws.String(endpoint)
@@ -134,11 +140,14 @@ func run(logger *slog.Logger) error {
 	)
 	breaker := domain.NewProviderBreaker(domain.BreakerConfig{Now: clk.Now})
 
+	emf := telemetry.NewEMFEmitter(os.Stdout, telemetry.DefaultNamespace)
+	workerMetrics := telemetry.NewWorkerMetrics(emf, clk.Now)
+
 	uc := execute.New(execRepo, reqRepo, apiClient, blobStore, consumer, retryPol, clk, logger, execute.Config{
 		OwnerID:     ownerID,
 		LeaseTTL:    time.Duration(visibilitySec) * time.Second,
 		CallTimeout: time.Duration(callTimeoutSec) * time.Second,
-	}).WithBreaker(breaker)
+	}).WithBreaker(breaker).WithMetrics(workerMetrics)
 	if providerRPS > 0 {
 		uc.WithLimiter(execute.NewProviderRateLimiter(providerRPS, 1))
 	}
