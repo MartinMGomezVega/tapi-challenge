@@ -61,7 +61,7 @@ deploy/terraform/
 - **Límite superior** `max_capacity` derivado de `LAMBDA_BUDGET` (C3).
 
 ## Entorno local
-`docker-compose.yml`: `localstack`, `init` (crea tablas y colas), `mockapi`, `dispatcher`, `worker`, `seed`. El reloj se acelera con la variable `CLOCK_SPEEDUP=720` (1 día = 2 min) a través del puerto `Clock`.
+`docker-compose.yml`: `localstack`, `init` (crea tablas y colas), `mockapi`, `dispatcher`, `worker`, `seed`. El reloj se acelera con la variable `CLOCK_SPEEDUP=720` (1 día = 2 min) mediante `internal/platform/clock` (alineado con `002/tasks.md` T004).
 
 ## Estrategia de test
 - `terraform validate`, `tflint`, `checkov` y `terraform test` para los módulos `data` y `messaging` (verifican FIFO, DLQ y PITR).
