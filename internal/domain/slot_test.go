@@ -156,6 +156,9 @@ func TestSlotAssigner_InvalidInputs(t *testing.T) {
 // T009: Global uniformity <= 1.10 x average with 1M records (FR-002, SC-002, US1 Scenario 3).
 func TestSlotAssigner_GlobalUniformity1M(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping 1M uniformity test in -short mode; run make test-full")
+	}
 
 	const (
 		totalRecords = 1_000_000
@@ -241,14 +244,15 @@ func TestSlotAssigner_GlobalUniformityProperty(t *testing.T) {
 		t.Fatalf("NewSlotAssigner(4): %v", err)
 	}
 
+	// Universal property across 10..60 providers: each provider contributes at most +1
+	// above floor(k/1440) to any minute, so global spread (max - min) <= numProviders.
 	rapid.Check(t, func(t *rapid.T) {
-		numProviders := rapid.IntRange(5, 10).Draw(t, "numProviders")
+		numProviders := rapid.IntRange(10, 60).Draw(t, "numProviders")
 		var globalHist [domain.SlotsPerDay]int
 		total := 0
 
 		for p := range numProviders {
-			// Operational regime where avg records/min >= 10 * numProviders (guarantees SC-002 bound).
-			k := rapid.IntRange(15_000, 20_000).Draw(t, fmt.Sprintf("k_%d", p))
+			k := rapid.IntRange(100, 3_000).Draw(t, fmt.Sprintf("k_%d", p))
 			provider := "prov-" + strconv.Itoa(p)
 			total += k
 			for r := range k {
@@ -260,10 +264,70 @@ func TestSlotAssigner_GlobalUniformityProperty(t *testing.T) {
 			}
 		}
 
+		minMinute := slices.Min(globalHist[:])
+		maxMinute := slices.Max(globalHist[:])
+		if spread := maxMinute - minMinute; spread > numProviders {
+			t.Fatalf("total=%d numProviders=%d spread=%d (min=%d max=%d) exceeds numProviders",
+				total, numProviders, spread, minMinute, maxMinute)
+		}
+
 		avg := float64(total) / float64(domain.SlotsPerDay)
+		if avg >= 10*float64(numProviders) && float64(maxMinute) > avg*1.10 {
+			t.Fatalf("total=%d avg=%.2f maxMinute=%d exceeds 1.10*avg", total, avg, maxMinute)
+		}
+	})
+}
+
+func TestSlotAssigner_GlobalUniformityScaleProperty1M(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping 1M scale property test in -short mode; run make test-full")
+	}
+
+	assigner, err := domain.NewSlotAssigner(4)
+	if err != nil {
+		t.Fatalf("NewSlotAssigner(4): %v", err)
+	}
+
+	const totalRecords = 1_000_000
+	avg := float64(totalRecords) / float64(domain.SlotsPerDay)
+
+	// Random provider counts in [10, 60] with random weights scaled to 1M records must
+	// satisfy SC-002 (max minute <= 1.10 * avg).
+	rapid.Check(t, func(t *rapid.T) {
+		numProviders := rapid.IntRange(10, 60).Draw(t, "numProviders")
+		weights := make([]int, numProviders)
+		weightSum := 0
+		for p := range numProviders {
+			w := rapid.IntRange(1, 100).Draw(t, fmt.Sprintf("w_%d", p))
+			weights[p] = w
+			weightSum += w
+		}
+
+		counts := make([]int, numProviders)
+		assigned := 0
+		for p, w := range weights {
+			c := max(1, (totalRecords*w)/weightSum)
+			counts[p] = c
+			assigned += c
+		}
+		counts[0] += totalRecords - assigned
+
+		var globalHist [domain.SlotsPerDay]int
+		for p, k := range counts {
+			provider := "prov-" + strconv.Itoa(p)
+			for r := range k {
+				got, err := assigner.Assign(provider, "id", r, k)
+				if err != nil {
+					t.Fatalf("Assign(): %v", err)
+				}
+				globalHist[got.Slot]++
+			}
+		}
+
 		maxMinute := slices.Max(globalHist[:])
 		if float64(maxMinute) > avg*1.10 {
-			t.Fatalf("total=%d avg=%.2f maxMinute=%d exceeds 1.10*avg", total, avg, maxMinute)
+			t.Fatalf("numProviders=%d avg=%.2f maxMinute=%d exceeds 1.10*avg", numProviders, avg, maxMinute)
 		}
 	})
 }
@@ -280,9 +344,14 @@ func TestSlotAssigner_PerProviderUniformity(t *testing.T) {
 	t.Run("k >= 1440 bounded by ceil(k/1440)+1", func(t *testing.T) {
 		t.Parallel()
 
+		maxK := 500_000
+		if testing.Short() {
+			maxK = 10_000
+		}
+
 		rapid.Check(t, func(t *rapid.T) {
 			provider := rapid.StringMatching(`[a-z][a-z0-9]{2,12}`).Draw(t, "provider")
-			k := rapid.IntRange(domain.SlotsPerDay, 50_000).Draw(t, "k")
+			k := rapid.IntRange(domain.SlotsPerDay, maxK).Draw(t, "k")
 
 			var hist [domain.SlotsPerDay]int
 			for r := range k {
