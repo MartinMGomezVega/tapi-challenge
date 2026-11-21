@@ -2,13 +2,30 @@ package sqsq
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"strconv"
+	"sync"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
+	"github.com/martingomezvega/tapi-challenge/internal/app/dispatch"
 	"github.com/martingomezvega/tapi-challenge/internal/app/execute"
+)
+
+const (
+	defaultReceivers         = 2
+	defaultMaxInflight       = 32
+	defaultWaitTimeSeconds   = 20
+	defaultVisibilityTimeout = 60 * time.Second
+	defaultShutdownTimeout   = 25 * time.Second
+	sqsMaxBatchReceive       = 10
+	sqsMaxVisibilitySeconds  = 43200 // 12 hours SQS hard limit
 )
 
 // SQSAPI is the minimal AWS SQS client surface needed by Consumer.
@@ -33,29 +50,337 @@ type ConsumerConfig struct {
 	ShutdownTimeout   time.Duration
 }
 
-// Consumer polls SQS FIFO, pre-acquires semaphore slots, groups batches by MessageGroupId
-// for sequential per-provider execution, runs visibility heartbeats, and shuts down gracefully.
-type Consumer struct{}
+// Consumer polls SQS FIFO, pre-acquires semaphore slots before ReceiveMessage,
+// groups batches by MessageGroupId for sequential per-provider execution,
+// runs visibility heartbeats, and shuts down gracefully.
+type Consumer struct {
+	client SQSAPI
+	cfg    ConsumerConfig
+	logger *slog.Logger
+	tokens chan struct{}
+}
 
 // NewConsumer constructs an SQS FIFO Consumer.
-func NewConsumer(_ SQSAPI, _ ConsumerConfig, _ *slog.Logger) *Consumer { return &Consumer{} }
+func NewConsumer(client SQSAPI, cfg ConsumerConfig, logger *slog.Logger) *Consumer {
+	if cfg.Receivers <= 0 {
+		cfg.Receivers = defaultReceivers
+	}
+	if cfg.MaxInflight <= 0 {
+		cfg.MaxInflight = defaultMaxInflight
+	}
+	if cfg.WaitTimeSeconds <= 0 {
+		cfg.WaitTimeSeconds = defaultWaitTimeSeconds
+	}
+	if cfg.VisibilityTimeout <= 0 {
+		cfg.VisibilityTimeout = defaultVisibilityTimeout
+	}
+	if cfg.ShutdownTimeout <= 0 {
+		cfg.ShutdownTimeout = defaultShutdownTimeout
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Consumer{
+		client: client,
+		cfg:    cfg,
+		logger: logger,
+		tokens: make(chan struct{}, cfg.MaxInflight),
+	}
+}
 
 // Run starts receiver goroutines until ctx is cancelled, then drains inflight messages cleanly.
-func (c *Consumer) Run(_ context.Context, _ Handler) error {
-	return errors.New("not implemented")
+func (c *Consumer) Run(ctx context.Context, handler Handler) error {
+	if handler == nil {
+		return errors.New("sqsq consumer: handler is required")
+	}
+
+	// execCtx remains alive after ctx cancellation so inflight calls can finish within ShutdownTimeout.
+	execCtx, cancelExec := context.WithCancel(context.Background())
+	defer cancelExec()
+
+	var (
+		recvWG sync.WaitGroup
+		workWG sync.WaitGroup
+	)
+
+	for range c.cfg.Receivers {
+		recvWG.Add(1)
+		go func() {
+			defer recvWG.Done()
+			c.receiveLoop(ctx, execCtx, handler, &workWG)
+		}()
+	}
+
+	// Wait for shutdown signal, then stop receivers and give inflight handlers up to ShutdownTimeout.
+	<-ctx.Done()
+	recvWG.Wait()
+
+	done := make(chan struct{})
+	go func() {
+		workWG.Wait()
+		close(done)
+	}()
+
+	timer := time.NewTimer(c.cfg.ShutdownTimeout)
+	defer timer.Stop()
+
+	select {
+	case <-done:
+		return nil
+	case <-timer.C:
+		c.logger.Warn("worker shutdown timeout reached, cancelling remaining inflight work",
+			"timeout", c.cfg.ShutdownTimeout.String())
+		cancelExec()
+		<-done
+		return nil
+	}
+}
+
+func (c *Consumer) receiveLoop(stopCtx, execCtx context.Context, handler Handler, workWG *sync.WaitGroup) {
+	visSec := int32(c.cfg.VisibilityTimeout / time.Second)
+	if visSec <= 0 {
+		visSec = 60
+	}
+
+	for {
+		// Pre-acquire at least 1 semaphore slot before polling SQS (003 US4.2).
+		acquired, ok := c.acquireSlots(stopCtx)
+		if !ok {
+			return
+		}
+
+		out, err := c.client.ReceiveMessage(stopCtx, &sqs.ReceiveMessageInput{
+			QueueUrl:                    aws.String(c.cfg.QueueURL),
+			MaxNumberOfMessages:         int32(acquired),
+			WaitTimeSeconds:             c.cfg.WaitTimeSeconds,
+			VisibilityTimeout:           visSec,
+			MessageSystemAttributeNames: []sqstypes.MessageSystemAttributeName{
+				sqstypes.MessageSystemAttributeNameMessageGroupId,
+				sqstypes.MessageSystemAttributeNameApproximateReceiveCount,
+			},
+			MessageAttributeNames: []string{"traceparent"},
+		})
+		if err != nil {
+			c.releaseSlots(acquired)
+			if stopCtx.Err() != nil {
+				return
+			}
+			c.logger.Error("sqs receive failed", "error", err)
+			select {
+			case <-stopCtx.Done():
+				return
+			case <-time.After(500 * time.Millisecond):
+			}
+			continue
+		}
+
+		received := len(out.Messages)
+		if unused := acquired - received; unused > 0 {
+			c.releaseSlots(unused)
+		}
+		if received == 0 {
+			continue
+		}
+
+		// Critical FIFO invariant (003/plan.md): group batch by MessageGroupId and process each group sequentially.
+		groups, groupOrder := groupByMessageGroup(out.Messages)
+		for _, gid := range groupOrder {
+			msgs := groups[gid]
+			workWG.Add(1)
+			go func(groupMsgs []sqstypes.Message) {
+				defer workWG.Done()
+				c.processGroup(stopCtx, execCtx, groupMsgs, handler)
+			}(msgs)
+		}
+	}
+}
+
+func (c *Consumer) acquireSlots(ctx context.Context) (int, bool) {
+	// Wait for the first slot.
+	select {
+	case <-ctx.Done():
+		return 0, false
+	case c.tokens <- struct{}{}:
+	}
+
+	acquired := 1
+	limit := min(sqsMaxBatchReceive, c.cfg.MaxInflight)
+	for acquired < limit {
+		select {
+		case c.tokens <- struct{}{}:
+			acquired++
+		default:
+			return acquired, true
+		}
+	}
+	return acquired, true
+}
+
+func (c *Consumer) releaseSlots(n int) {
+	for range n {
+		<-c.tokens
+	}
+}
+
+func (c *Consumer) processGroup(stopCtx, execCtx context.Context, rawMsgs []sqstypes.Message, handler Handler) {
+	for _, raw := range rawMsgs {
+		func(m sqstypes.Message) {
+			defer c.releaseSlots(1)
+
+			msg, err := parseMessage(m)
+			if err != nil {
+				c.logger.Error("malformed sqs message body, deleting poison message", "error", err)
+				_ = c.Ack(execCtx, execute.Message{ReceiptHandle: aws.ToString(m.ReceiptHandle)})
+				return
+			}
+
+			// Graceful shutdown (003 US5): do not start queued messages after SIGTERM; release immediately.
+			if stopCtx.Err() != nil {
+				if nackErr := c.Nack(execCtx, msg, 0); nackErr != nil {
+					c.logger.Warn("failed to nack pending message during shutdown",
+						"request_id", msg.RequestID, "error", nackErr)
+				}
+				return
+			}
+
+			// Visibility heartbeat every VT/2 for long-running calls (003 FR-005).
+			hbCtx, stopHB := context.WithCancel(execCtx)
+			hbDone := make(chan struct{})
+			go func() {
+				defer close(hbDone)
+				c.runHeartbeat(hbCtx, msg)
+			}()
+
+			err = handler.Execute(execCtx, msg)
+			stopHB()
+			<-hbDone
+
+			if err != nil && !errors.Is(err, context.Canceled) {
+				c.logger.Warn("message handler returned error",
+					"request_id", msg.RequestID,
+					"provider", msg.Provider,
+					"error", err)
+			}
+		}(raw)
+	}
+}
+
+func (c *Consumer) runHeartbeat(ctx context.Context, msg execute.Message) {
+	interval := c.cfg.VisibilityTimeout / 2
+	if interval < time.Second {
+		interval = time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := c.Extend(ctx, msg, c.cfg.VisibilityTimeout); err != nil && ctx.Err() == nil {
+				c.logger.Warn("visibility heartbeat failed",
+					"request_id", msg.RequestID, "provider", msg.Provider, "error", err)
+			}
+		}
+	}
+}
+
+func groupByMessageGroup(msgs []sqstypes.Message) (map[string][]sqstypes.Message, []string) {
+	groups := make(map[string][]sqstypes.Message, len(msgs))
+	order := make([]string, 0, len(msgs))
+	for _, m := range msgs {
+		gid := m.Attributes["MessageGroupId"]
+		if gid == "" {
+			gid = aws.ToString(m.MessageId)
+		}
+		if _, exists := groups[gid]; !exists {
+			order = append(order, gid)
+		}
+		groups[gid] = append(groups[gid], m)
+	}
+	return groups, order
+}
+
+func parseMessage(raw sqstypes.Message) (execute.Message, error) {
+	var job dispatch.JobMessage
+	if err := json.Unmarshal([]byte(aws.ToString(raw.Body)), &job); err != nil {
+		return execute.Message{}, fmt.Errorf("unmarshal job message: %w", err)
+	}
+	if job.RequestID == "" || job.RunDate == "" {
+		return execute.Message{}, errors.New("job message missing request_id or run_date")
+	}
+
+	receiveCount := 1
+	if rcStr := raw.Attributes["ApproximateReceiveCount"]; rcStr != "" {
+		if rc, err := strconv.Atoi(rcStr); err == nil && rc > 0 {
+			receiveCount = rc
+		}
+	}
+	traceParent := job.TraceContext
+	if attr, ok := raw.MessageAttributes["traceparent"]; ok && attr.StringValue != nil && *attr.StringValue != "" {
+		traceParent = *attr.StringValue
+	}
+	gid := raw.Attributes["MessageGroupId"]
+	if gid == "" {
+		gid = job.Provider
+	}
+
+	return execute.Message{
+		RequestID:      job.RequestID,
+		RunDate:        job.RunDate,
+		Provider:       job.Provider,
+		Slot:           job.Slot,
+		TraceContext:   traceParent,
+		ReceiptHandle:  aws.ToString(raw.ReceiptHandle),
+		ReceiveCount:   receiveCount,
+		MessageGroupID: gid,
+	}, nil
 }
 
 // Ack deletes the message from SQS.
-func (c *Consumer) Ack(_ context.Context, _ execute.Message) error {
-	return errors.New("not implemented")
+func (c *Consumer) Ack(ctx context.Context, m execute.Message) error {
+	if m.ReceiptHandle == "" {
+		return nil
+	}
+	_, err := c.client.DeleteMessage(ctx, &sqs.DeleteMessageInput{
+		QueueUrl:      aws.String(c.cfg.QueueURL),
+		ReceiptHandle: aws.String(m.ReceiptHandle),
+	})
+	if err != nil {
+		return fmt.Errorf("sqs delete %s: %w", m.RequestID, err)
+	}
+	return nil
 }
 
 // Nack releases or delays visibility of the message in SQS.
-func (c *Consumer) Nack(_ context.Context, _ execute.Message, _ time.Duration) error {
-	return errors.New("not implemented")
+func (c *Consumer) Nack(ctx context.Context, m execute.Message, delay time.Duration) error {
+	return c.changeVisibility(ctx, m, delay)
 }
 
 // Extend extends visibility timeout for the message in SQS.
-func (c *Consumer) Extend(_ context.Context, _ execute.Message, _ time.Duration) error {
-	return errors.New("not implemented")
+func (c *Consumer) Extend(ctx context.Context, m execute.Message, d time.Duration) error {
+	return c.changeVisibility(ctx, m, d)
+}
+
+func (c *Consumer) changeVisibility(ctx context.Context, m execute.Message, d time.Duration) error {
+	if m.ReceiptHandle == "" {
+		return nil
+	}
+	sec := int32(d / time.Second)
+	if sec < 0 {
+		sec = 0
+	}
+	if sec > sqsMaxVisibilitySeconds {
+		sec = sqsMaxVisibilitySeconds
+	}
+	_, err := c.client.ChangeMessageVisibility(ctx, &sqs.ChangeMessageVisibilityInput{
+		QueueUrl:          aws.String(c.cfg.QueueURL),
+		ReceiptHandle:     aws.String(m.ReceiptHandle),
+		VisibilityTimeout: sec,
+	})
+	if err != nil {
+		return fmt.Errorf("sqs change visibility %s (%ds): %w", m.RequestID, sec, err)
+	}
+	return nil
 }
