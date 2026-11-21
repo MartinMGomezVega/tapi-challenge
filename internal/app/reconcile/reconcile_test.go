@@ -197,3 +197,70 @@ func TestReconcile_RedispatchAndIdempotency(t *testing.T) {
 		t.Fatalf("Run #2 must be idempotent (0 redispatches), got redispatched=%d total_sent=%d", sum2.Redispatched, len(queue.sent))
 	}
 }
+
+type failingCatalog struct{}
+
+func (failingCatalog) ListBySlotShard(_ context.Context, _, _ int, _ string) ([]domain.RequestKey, string, error) {
+	return nil, "", context.Canceled
+}
+
+type failingBatchStore struct{ fakeExecStore }
+
+func (*failingBatchStore) BatchGet(_ context.Context, _ []string, _ domain.RunDate) (map[string]domain.ExecutionSnapshot, error) {
+	return nil, context.Canceled
+}
+
+type failingReportStore struct{}
+
+func (failingReportStore) PutWithContentType(_ context.Context, _ string, _ []byte, _ string) error {
+	return context.Canceled
+}
+
+func TestReconcile_EdgeAndErrorPaths(t *testing.T) {
+	t.Parallel()
+
+	date := domain.RunDate("2026-11-21")
+	now := time.Date(2026, 11, 22, 0, 30, 0, 0, time.UTC)
+
+	// Invalid date
+	uc := reconcile.New(&fakeCatalog{}, &fakeExecStore{}, &fakeQueue{}, nil, nil, nil, nil, reconcile.Config{})
+	if _, err := uc.Run(context.Background(), domain.RunDate("bad-date")); err == nil {
+		t.Fatalf("expected invalid date error")
+	}
+
+	// Catalog list error
+	ucCatErr := reconcile.New(failingCatalog{}, &fakeExecStore{}, &fakeQueue{}, nil, nil, func() time.Time { return now }, nil, reconcile.Config{Shards: 1, Parallelism: 2})
+	if _, err := ucCatErr.Run(context.Background(), date); err == nil {
+		t.Fatalf("expected catalog error")
+	}
+
+	// BatchGet error + error class aggregation + in-flight
+	cat := &fakeCatalog{
+		bySlotShard: map[[2]int][]domain.RequestKey{
+			{0, 0}: {
+				{ID: "r-err", Provider: "edenor", Enabled: true, CreatedAt: now.Add(-48 * time.Hour)},
+				{ID: "r-inflight", Provider: "edenor", Enabled: true, CreatedAt: now.Add(-48 * time.Hour)},
+			},
+		},
+	}
+	ucBatchErr := reconcile.New(cat, &failingBatchStore{}, &fakeQueue{}, nil, nil, func() time.Time { return now }, nil, reconcile.Config{Shards: 1, Parallelism: 1})
+	if _, err := ucBatchErr.Run(context.Background(), date); err == nil {
+		t.Fatalf("expected batch get error")
+	}
+
+	// TopErrors + InFlight + report store error
+	store := &fakeExecStore{
+		items: map[string]domain.ExecutionSnapshot{
+			"r-err":      {RequestID: "r-err", Status: domain.StatusFailedPermanent, ErrorClass: "INVALID_REQUEST", UpdatedAt: now.Add(-5 * time.Hour)},
+			"r-inflight": {RequestID: "r-inflight", Status: domain.StatusInProgress, UpdatedAt: now.Add(-10 * time.Minute)},
+		},
+	}
+	ucRepErr := reconcile.New(cat, store, nil, failingReportStore{}, nil, func() time.Time { return now }, nil, reconcile.Config{Shards: 1, Parallelism: 1})
+	sum, err := ucRepErr.Run(context.Background(), date)
+	if err == nil {
+		t.Fatalf("expected report store error")
+	}
+	if sum.TopErrors["INVALID_REQUEST"] != 1 || sum.InFlight != 1 {
+		t.Fatalf("unexpected partial summary: %+v", sum)
+	}
+}
