@@ -30,10 +30,10 @@
 ## Fase 4: US2 — Backfill (P1)
 - [x] T016b [US2] Agregar GSI `gsi_provider` (`PK provider`, `SK id`, `INCLUDE (version, slot, shard, enabled)`) en `scripts/localstack-init.sh` y `test/testenv/localstack.go`
 - [x] T016c [US2] Test de integración + implementación de `CountByProvider` y `ListByProvider` (ordenado por SK, proyectando `version, slot, shard, enabled`, paginado, sin `Scan`) en `internal/adapters/dynamo/requests.go` (FR-004b)
-- [ ] T017 [US2] Test: el caso de uso `AssignSlots` es idempotente (2 runs = mismo estado), aplica rebalanceo completo si `nuevos > 1440` o asignación incremental si `nuevos ≤ 1440`, y asigna altas concurrentes (`rank ≥ k`) vía `AssignIncremental`
-- [ ] T017b [US2] Test: seguridad del día en curso (FR-005b / R1) — registro habilitado con `slot_nuevo < slot_actual ≤ slot_viejo` se despacha vía `ImmediateDispatcher`; caso inverso (ya ejecutado → slot futuro) no despacha de nuevo
-- [ ] T018 [US2] Test: reanuda desde el checkpoint `(proveedor, cursor, rank)` tras una interrupción (fake `Checkpointer`)
-- [ ] T018b [US2] Test: el backfill persiste el registro del proveedor (`k` e histograma `provider_slot_counts`) en `coordination` para altas incrementales y US3
+- [x] T017 [US2] Test: el caso de uso `AssignSlots` es idempotente (2 runs = mismo estado), aplica rebalanceo completo si `nuevos > 1440` o asignación incremental si `nuevos ≤ 1440`, y asigna altas concurrentes (`rank ≥ k`) vía `AssignIncremental`
+- [x] T017b [US2] Test: seguridad del día en curso (FR-005b / R1) — registro habilitado con `slot_nuevo < slot_actual ≤ slot_viejo` se despacha vía `ImmediateDispatcher`; caso inverso (ya ejecutado → slot futuro) no despacha de nuevo
+- [x] T018 [US2] Test: reanuda desde el checkpoint `(proveedor, cursor, rank)` tras una interrupción (fake `Checkpointer`)
+- [x] T018b [US2] Test: el backfill persiste el registro del proveedor (`k` e histograma `provider_slot_counts`) en `coordination` para altas incrementales y US3
 - [ ] T019 [US2] Implementar `app/assignslots` (Query en streaming por proveedor sobre `gsi_provider` sin `Scan` ni sort en RAM, `errgroup` por proveedor, rate limiter de WCU, checkpoint `(proveedor, cursor)`, umbral `> 1440` rebalanceo vs incremental, `rank ≥ k` vía histograma y puerto `ImmediateDispatcher` con stub)
 - [ ] T019b [US2] Implementar store DynamoDB en `coordination` para registro de proveedores (`k` + histograma) y checkpoints de backfill (`internal/adapters/dynamo/coordination.go`) con tests de integración
 - [ ] T020 [US2] Test de integración: backfill en LocalStack con corte y reanudación, verificando 100 % de slots asignados, registro/histograma persistido en `coordination` y memoria acotada sobre `app/assignslots` + adaptador real
