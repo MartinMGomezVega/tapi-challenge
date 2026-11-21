@@ -1,0 +1,11 @@
+# Default repository owners
+* @martingomezvega
+
+# Core domain and architecture specs
+/specs/ @martingomezvega
+/docs/architecture.md @martingomezvega
+/internal/domain/ @martingomezvega
+
+# Infrastructure and security require explicit review
+/deploy/terraform/ @martingomezvega
+/.github/workflows/ @martingomezvega

@@ -1,0 +1,110 @@
+name: CD
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  build-and-push:
+    name: Build & Push Immutable ARM64 Images (SHA)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build and push dispatcher, worker, reconciler
+        run: |
+          REGISTRY="${{ steps.ecr.outputs.registry }}"
+          for svc in dispatcher worker reconciler; do
+            docker buildx build \
+              --platform linux/arm64 \
+              --file "build/${svc}.Dockerfile" \
+              --tag "${REGISTRY}/tapi-dev-${svc}:${{ github.sha }}" \
+              --push .
+          done
+
+  deploy-dev:
+    name: Deploy to dev & Smoke E2E
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.11.4"
+      - name: Deploy dev stack with immutable SHA tag
+        run: |
+          terraform -chdir=deploy/terraform/envs/dev init -input=false
+          terraform -chdir=deploy/terraform/envs/dev apply -auto-approve -var="image_tag=${{ github.sha }}"
+      - name: Wait for ECS services stability (deployment circuit breaker enabled)
+        run: |
+          aws ecs wait services-stable \
+            --cluster tapi-dev-cluster \
+            --services tapi-dev-dispatcher tapi-dev-worker
+
+  deploy-staging:
+    name: Deploy to staging (manual approval)
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_STAGING_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.11.4"
+      - name: Deploy staging stack
+        run: |
+          terraform -chdir=deploy/terraform/envs/staging init -input=false
+          terraform -chdir=deploy/terraform/envs/staging apply -auto-approve -var="image_tag=${{ github.sha }}"
+      - name: Wait for ECS services stability
+        run: |
+          aws ecs wait services-stable \
+            --cluster tapi-staging-cluster \
+            --services tapi-staging-dispatcher tapi-staging-worker
+
+  deploy-prod:
+    name: Deploy to prod (manual approval)
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_PROD_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.11.4"
+      - name: Deploy prod stack
+        run: |
+          terraform -chdir=deploy/terraform/envs/prod init -input=false
+          terraform -chdir=deploy/terraform/envs/prod apply -auto-approve -var="image_tag=${{ github.sha }}"
+      - name: Wait for ECS services stability (automatic rollback via circuit breaker on failure)
+        run: |
+          aws ecs wait services-stable \
+            --cluster tapi-prod-cluster \
+            --services tapi-prod-dispatcher tapi-prod-worker

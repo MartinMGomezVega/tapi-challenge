@@ -1,0 +1,47 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  full-scale-and-load-tests:
+    name: Full 1M Property, Scale & Zipf Load Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Full unit + 1M property tests (-race)
+        run: make test-full
+      - name: Zipf 200-provider load benchmark (SC-001..SC-003)
+        run: go test -tags=integration -race -v -run TestWorker_LoadBenchmark_Zipf200Providers ./internal/app/execute/...
+      - name: Security vulnerability scan (govulncheck)
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  terraform-drift-detection:
+    name: Terraform Drift Check (dev)
+    runs-on: ubuntu-latest
+    if: vars.ENABLE_DRIFT_CHECK == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_READONLY_ROLE_ARN }}
+          aws-region: us-east-1
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.11.4"
+      - name: Plan with -detailed-exitcode to detect drift
+        run: |
+          terraform -chdir=deploy/terraform/envs/dev init -input=false
+          terraform -chdir=deploy/terraform/envs/dev plan -detailed-exitcode -input=false
