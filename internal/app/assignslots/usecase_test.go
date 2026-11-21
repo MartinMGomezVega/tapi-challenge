@@ -23,13 +23,13 @@ type fakeClock struct {
 func (f fakeClock) Now() time.Time { return f.now }
 
 type fakeCatalog struct {
-	mu           sync.Mutex
-	items        map[string][]domain.ProviderRequestItem // provider -> sorted by ID
-	countOverride map[string]int                         // optional stale COUNT for rank >= k test
-	pageSize     int
-	setCalls     int
-	failAfterSet int // if > 0, return error after N SetSlot calls
-	failErr      error
+	mu            sync.Mutex
+	items         map[string][]domain.ProviderRequestItem // provider -> sorted by ID
+	countOverride map[string]int                          // optional stale COUNT for rank >= k test
+	pageSize      int
+	setCalls      int
+	failAfterSet  int // if > 0, return error after N SetSlot calls
+	failErr       error
 }
 
 func newFakeCatalog(pageSize int) *fakeCatalog {
@@ -40,19 +40,15 @@ func newFakeCatalog(pageSize int) *fakeCatalog {
 	}
 }
 
-func (c *fakeCatalog) addProvider(provider string, count int, slotted bool) {
+func (c *fakeCatalog) addProvider(provider string, count int) {
 	list := make([]domain.ProviderRequestItem, count)
 	for i := range count {
-		slot, shard := -1, -1
-		if slotted {
-			slot, shard = i%domain.SlotsPerDay, i%4
-		}
 		list[i] = domain.ProviderRequestItem{
 			ID:       fmt.Sprintf("%s-%06d", provider, i),
 			Provider: provider,
 			Version:  1,
-			Slot:     slot,
-			Shard:    shard,
+			Slot:     -1,
+			Shard:    -1,
 			Enabled:  true,
 		}
 	}
@@ -229,8 +225,8 @@ func TestUseCase_IdempotentTwoRuns(t *testing.T) {
 	}
 
 	cat := newFakeCatalog(5)
-	cat.addProvider("edenor", 12, false)
-	cat.addProvider("metrogas", 20, false)
+	cat.addProvider("edenor", 12)
+	cat.addProvider("metrogas", 20)
 
 	reg := newFakeRegistry(
 		assignslots.ProviderState{Provider: "edenor", Backfilled: false},
@@ -360,7 +356,7 @@ func TestUseCase_ConcurrentInsertsRankGeK(t *testing.T) {
 	}
 
 	cat := newFakeCatalog(4)
-	cat.addProvider("aysa", 10, false)
+	cat.addProvider("aysa", 10)
 	// Simulate COUNT returning 7 while streaming yields 10 items (3 concurrent inserts -> ranks 7, 8, 9 >= k).
 	cat.countOverride["aysa"] = 7
 
@@ -492,8 +488,8 @@ func TestUseCase_ResumeFromCheckpointAfterInterruption(t *testing.T) {
 	}
 
 	cat := newFakeCatalog(3) // 3 items per page -> multiple checkpoints per provider
-	cat.addProvider("alpha", 6, false)
-	cat.addProvider("beta", 9, false)
+	cat.addProvider("alpha", 6)
+	cat.addProvider("beta", 9)
 	injectedErr := errors.New("simulated network outage")
 	cat.failAfterSet = 10 // alpha (6) completes, beta fails during page 2 (after 4 writes)
 	cat.failErr = injectedErr
@@ -562,7 +558,7 @@ func TestUseCase_PersistsProviderHistogramInRegistry(t *testing.T) {
 	}
 
 	cat := newFakeCatalog(100)
-	cat.addProvider("telecom", 2500, false)
+	cat.addProvider("telecom", 2500)
 
 	reg := newFakeRegistry(assignslots.ProviderState{Provider: "telecom", NewSinceBackfill: 2500, Backfilled: false})
 	cps := newFakeCheckpointer()
@@ -608,5 +604,115 @@ func TestUseCase_PersistsProviderHistogramInRegistry(t *testing.T) {
 	minOcc := slices.Min(saved.Histogram[:])
 	if saved.Histogram[next.Slot] != minOcc {
 		t.Errorf("AssignIncremental picked slot %d with count %d, want min %d", next.Slot, saved.Histogram[next.Slot], minOcc)
+	}
+}
+
+func TestUseCase_ValidationDefaultsAndEmptyProvider(t *testing.T) {
+	t.Parallel()
+
+	assigner, _ := domain.NewSlotAssigner(4)
+	cat := newFakeCatalog(5)
+	reg := newFakeRegistry(assignslots.ProviderState{Provider: "empty-prov", Backfilled: false})
+	cps := newFakeCheckpointer()
+	clk := fakeClock{now: time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)}
+
+	if _, err := assignslots.New(nil, cat, cat, reg, cps, nil, clk, nil, assignslots.Config{}); !errors.Is(err, assignslots.ErrInvalidConfig) {
+		t.Errorf("New(nil assigner) error = %v, want %v", err, assignslots.ErrInvalidConfig)
+	}
+
+	// Nil dispatcher & nil logger & zero workers/threshold/location use safe defaults.
+	uc, err := assignslots.New(assigner, cat, cat, reg, cps, nil, clk, nil, assignslots.Config{WCULimit: 1000})
+	if err != nil {
+		t.Fatalf("New() unexpected error: %v", err)
+	}
+
+	if _, err := uc.Run(context.Background(), "   "); !errors.Is(err, assignslots.ErrInvalidConfig) {
+		t.Errorf("Run(empty jobID) error = %v, want %v", err, assignslots.ErrInvalidConfig)
+	}
+
+	stats, err := uc.Run(context.Background(), "job-empty")
+	if err != nil {
+		t.Fatalf("Run(empty-prov): %v", err)
+	}
+	if stats.ProvidersRebalanced != 1 || stats.SlotsUpdated != 0 {
+		t.Errorf("empty provider stats = %+v, want 1 rebalanced, 0 updated", stats)
+	}
+	if saved := reg.get("empty-prov"); !saved.Backfilled || saved.Count != 0 {
+		t.Errorf("empty provider saved state = %+v, want Backfilled=true Count=0", saved)
+	}
+}
+
+func TestUseCase_IncrementalResumeAndWCULimit(t *testing.T) {
+	t.Parallel()
+
+	assigner, _ := domain.NewSlotAssigner(4)
+	cat := newFakeCatalog(2) // forces multi-page checkpoints in incremental mode
+	var hist [domain.SlotsPerDay]int
+	for i := range 2 {
+		hist[i] = 1
+		cat.items["incp"] = append(cat.items["incp"], domain.ProviderRequestItem{
+			ID: fmt.Sprintf("incp-%03d", i), Provider: "incp", Version: 2, Slot: i, Shard: 0, Enabled: true,
+		})
+	}
+	for i := 2; i < 6; i++ {
+		cat.items["incp"] = append(cat.items["incp"], domain.ProviderRequestItem{
+			ID: fmt.Sprintf("incp-%03d", i), Provider: "incp", Version: 1, Slot: -1, Shard: -1, Enabled: true,
+		})
+	}
+
+	injectedErr := errors.New("wcu throttle")
+	cat.failAfterSet = 2
+	cat.failErr = injectedErr
+
+	reg := newFakeRegistry(assignslots.ProviderState{
+		Provider:         "incp",
+		Count:            2,
+		Histogram:        hist,
+		NewSinceBackfill: 4,
+		Backfilled:       true,
+	})
+	cps := newFakeCheckpointer()
+	clk := fakeClock{now: time.Date(2026, 11, 20, 2, 0, 0, 0, time.UTC)}
+
+	uc, err := assignslots.New(assigner, cat, cat, reg, cps, assignslots.NoopImmediateDispatcher{}, clk, discardLogger(), assignslots.Config{
+		Workers:  1,
+		WCULimit: 10_000,
+	})
+	if err != nil {
+		t.Fatalf("New(): %v", err)
+	}
+
+	if _, err := uc.Run(context.Background(), "job-inc-resume"); !errors.Is(err, injectedErr) {
+		t.Fatalf("first Run() error = %v, want %v", err, injectedErr)
+	}
+
+	// Resume after transient failure.
+	cat.failAfterSet = 0
+	stats, err := uc.Run(context.Background(), "job-inc-resume")
+	if err != nil {
+		t.Fatalf("resumed Run() failed: %v", err)
+	}
+	if stats.ProvidersIncrement != 1 {
+		t.Errorf("ProvidersIncrement = %d, want 1", stats.ProvidersIncrement)
+	}
+
+	saved := reg.get("incp")
+	if saved.Count != 6 || saved.NewSinceBackfill != 0 {
+		t.Errorf("saved state = (Count=%d New=%d), want (6, 0)", saved.Count, saved.NewSinceBackfill)
+	}
+	for _, it := range cat.snapshot("incp") {
+		if it.Slot < 0 || it.Shard < 0 {
+			t.Errorf("item left unslotted after incremental resume: %+v", it)
+		}
+	}
+
+	// Verify canceled context stops rate limiter wait cleanly.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cat.addProvider("cancel-prov", 3)
+	reg2 := newFakeRegistry(assignslots.ProviderState{Provider: "cancel-prov", Backfilled: false})
+	uc2, _ := assignslots.New(assigner, cat, cat, reg2, newFakeCheckpointer(), nil, clk, discardLogger(), assignslots.Config{WCULimit: 1})
+	if _, err := uc2.Run(ctx, "job-cancel"); !errors.Is(err, context.Canceled) {
+		t.Errorf("Run(canceled ctx) error = %v, want context.Canceled", err)
 	}
 }

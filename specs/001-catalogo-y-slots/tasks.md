@@ -34,7 +34,7 @@
 - [x] T017b [US2] Test: seguridad del día en curso (FR-005b / R1) — registro habilitado con `slot_nuevo < slot_actual ≤ slot_viejo` se despacha vía `ImmediateDispatcher`; caso inverso (ya ejecutado → slot futuro) no despacha de nuevo
 - [x] T018 [US2] Test: reanuda desde el checkpoint `(proveedor, cursor, rank)` tras una interrupción (fake `Checkpointer`)
 - [x] T018b [US2] Test: el backfill persiste el registro del proveedor (`k` e histograma `provider_slot_counts`) en `coordination` para altas incrementales y US3
-- [ ] T019 [US2] Implementar `app/assignslots` (Query en streaming por proveedor sobre `gsi_provider` sin `Scan` ni sort en RAM, `errgroup` por proveedor, rate limiter de WCU, checkpoint `(proveedor, cursor)`, umbral `> 1440` rebalanceo vs incremental, `rank ≥ k` vía histograma y puerto `ImmediateDispatcher` con stub)
+- [x] T019 [US2] Implementar `app/assignslots` (Query en streaming por proveedor sobre `gsi_provider` sin `Scan` ni sort en RAM, `errgroup` por proveedor, rate limiter de WCU, checkpoint `(proveedor, cursor)`, umbral `> 1440` rebalanceo vs incremental, `rank ≥ k` vía histograma y puerto `ImmediateDispatcher` con stub)
 - [ ] T019b [US2] Implementar store DynamoDB en `coordination` para registro de proveedores (`k` + histograma) y checkpoints de backfill (`internal/adapters/dynamo/coordination.go`) con tests de integración
 - [ ] T020 [US2] Test de integración: backfill en LocalStack con corte y reanudación, verificando 100 % de slots asignados, registro/histograma persistido en `coordination` y memoria acotada sobre `app/assignslots` + adaptador real
 - [ ] T021 [US2] `cmd/slotter` con flags (`--workers`, `--wcu-limit`, `--shards`) y graceful shutdown
