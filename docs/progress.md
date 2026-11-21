@@ -1,7 +1,6 @@
 # Progreso de ejecución autónoma
 
-- **Feature actual**: Cierre final en `main` (`docs/evidence/final-report.md`)
-- **Última tarea terminada**: `006-infraestructura-y-delivery` completa (`T001`–`T025`, `checkpoint-006.md` generado)
-- **Próxima tarea**: Merge `--no-ff` de `006-infraestructura-y-delivery` a `main` → generar `docs/evidence/final-report.md` → reporte final al usuario (sin `git push`).
+- **Estado**: **COMPLETADO** (features `001`–`006` mergeadas a `main` con `--no-ff`, sin `git push` ni `terraform apply`).
+- **Último entregable**: [docs/evidence/final-report.md](file:///Users/martingomezvega/challenge/tapi-challenge/docs/evidence/final-report.md)
 - **Bloqueos**: Ninguno
-- **Pendientes diferidos entre features**: Ninguno (todos cerrados: `001-T025` en `005`, `006-T004` en `006`).
+- **Pendientes diferidos entre features**: Ninguno (`001-T025` cerrado en `005`; `006-T004` cerrado en `006`).
