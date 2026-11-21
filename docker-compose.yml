@@ -31,8 +31,61 @@ services:
       - ./scripts/localstack-init.sh:/scripts/localstack-init.sh:ro
     entrypoint: ["/bin/sh", "/scripts/localstack-init.sh"]
 
-  # Services to be wired in M1/M2 (features 001-US2, 002, 003):
-  # - mockapi    (feature 003)
-  # - dispatcher (feature 002)
-  # - worker     (feature 003)
-  # - seed       (feature 001-US2)
+  mockapi:
+    build:
+      context: .
+      dockerfile: build/mockapi.Dockerfile
+    container_name: tapi-mockapi
+    profiles: ["services"]
+    ports:
+      - "8090:8090"
+    environment:
+      - ADDR=:8090
+      - DEFAULT_LATENCY_MS=2
+
+  dispatcher:
+    build:
+      context: .
+      dockerfile: build/dispatcher.Dockerfile
+    container_name: tapi-dispatcher
+    profiles: ["services"]
+    depends_on:
+      localstack:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_REGION=us-east-1
+      - AWS_DEFAULT_REGION=us-east-1
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - JOBS_QUEUE_NAME=tapi-jobs.fifo
+      - SHARDS=4
+      - CLOCK_SPEEDUP=${CLOCK_SPEEDUP:-720}
+
+  worker:
+    build:
+      context: .
+      dockerfile: build/worker.Dockerfile
+    container_name: tapi-worker
+    profiles: ["services"]
+    depends_on:
+      localstack:
+        condition: service_healthy
+      mockapi:
+        condition: service_started
+    ports:
+      - "8081:8081"
+    environment:
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_REGION=us-east-1
+      - AWS_DEFAULT_REGION=us-east-1
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - JOBS_QUEUE_NAME=tapi-jobs.fifo
+      - PROVIDER_API_BASE_URL=http://mockapi:8090
+      - INFLIGHT_PER_TASK=32
+      - MAX_TASKS=4
+      - LAMBDA_BUDGET=1000
+      - RECEIVERS=2
