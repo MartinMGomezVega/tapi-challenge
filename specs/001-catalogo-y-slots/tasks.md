@@ -30,8 +30,10 @@
 ## Fase 4: US2 — Backfill (P1)
 - [ ] T017 [US2] Test: el caso de uso `AssignSlots` es idempotente (2 runs = mismo estado)
 - [ ] T018 [US2] Test: reanuda desde el checkpoint tras una interrupción (fake `Checkpointer`)
-- [ ] T019 [US2] Implementar `app/assignslots` (parallel scan por segmento, rate limiter de WCU, checkpoint)
-- [ ] T020 [US2] Test de integración: 100k registros en LocalStack, cortar y reanudar
+- [ ] T018b [US2] Test: el backfill persiste el histograma `provider_slot_counts` por proveedor en `coordination` para habilitar altas incrementales
+- [ ] T019 [US2] Implementar `app/assignslots` (parallel scan por segmento, rate limiter de WCU, checkpoint y actualización del histograma en `coordination`)
+- [ ] T019b [US2] Implementar store DynamoDB de checkpoint + histograma `provider_slot_counts` en `coordination` (`internal/adapters/dynamo/coordination.go`)
+- [ ] T020 [US2] Test de integración: 100k registros en LocalStack, cortar, reanudar y verificar histograma persistido en `coordination`
 - [ ] T021 [US2] `cmd/slotter` con flags (`--segments`, `--wcu-limit`, `--shards`) y graceful shutdown
 - [ ] T022 [P] [US2] Generador de dataset sintético (`cmd/seed`): 1M de registros con una distribución de proveedores Zipf
 
