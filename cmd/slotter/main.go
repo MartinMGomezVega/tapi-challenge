@@ -16,9 +16,12 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
 
 	"github.com/martingomezvega/tapi-challenge/internal/adapters/dynamo"
+	"github.com/martingomezvega/tapi-challenge/internal/adapters/sqsq"
 	"github.com/martingomezvega/tapi-challenge/internal/app/assignslots"
+	"github.com/martingomezvega/tapi-challenge/internal/app/dispatch"
 	"github.com/martingomezvega/tapi-challenge/internal/domain"
 	"github.com/martingomezvega/tapi-challenge/internal/platform/clock"
 )
@@ -39,7 +42,9 @@ func run(logger *slog.Logger) error {
 		pageSize      int
 		jobID         string
 		reqTable      string
+		execTable     string
 		coordTable    string
+		queueURL      string
 		endpoint      string
 		region        string
 		tzName        string
@@ -52,7 +57,9 @@ func run(logger *slog.Logger) error {
 	flag.IntVar(&pageSize, "page-size", int(dynamo.DefaultPageSize), "DynamoDB gsi_provider Query page size")
 	flag.StringVar(&jobID, "job-id", time.Now().UTC().Format("backfill-20060102"), "resumable backfill job ID")
 	flag.StringVar(&reqTable, "requests-table", envOrDefault("REQUESTS_TABLE", "requests"), "DynamoDB requests table")
+	flag.StringVar(&execTable, "executions-table", envOrDefault("EXECUTIONS_TABLE", "executions"), "DynamoDB executions table (for FR-005b immediate dispatch)")
 	flag.StringVar(&coordTable, "coordination-table", envOrDefault("COORDINATION_TABLE", "coordination"), "DynamoDB coordination table")
+	flag.StringVar(&queueURL, "queue-url", os.Getenv("JOBS_QUEUE_URL"), "SQS FIFO queue URL for FR-005b immediate dispatch (empty uses noop)")
 	flag.StringVar(&endpoint, "endpoint", os.Getenv("AWS_ENDPOINT_URL"), "optional AWS endpoint override (e.g. LocalStack)")
 	flag.StringVar(&region, "region", envOrDefault("AWS_DEFAULT_REGION", "us-east-1"), "AWS region")
 	flag.StringVar(&tzName, "tz", envOrDefault("RUN_DAY_TZ", "UTC"), "timezone for same-day slot calculation (FR-005b)")
@@ -77,7 +84,7 @@ func run(logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	ddb, err := newDynamoClient(ctx, region, endpoint)
+	ddb, sqsClient, err := newAWSClients(ctx, region, endpoint)
 	if err != nil {
 		return err
 	}
@@ -91,13 +98,26 @@ func run(logger *slog.Logger) error {
 	reqRepo := dynamo.NewRequestsRepo(ddb, reqTable, repoOpts...)
 	coordRepo := dynamo.NewCoordinationRepo(ddb, coordTable)
 
+	var immediate assignslots.ImmediateDispatcher = assignslots.NoopImmediateDispatcher{}
+	if queueURL != "" {
+		execRepo := dynamo.NewExecutionsRepo(ddb, execTable, dynamo.DefaultExecutionTTL)
+		dispUC, err := dispatch.New(reqRepo, execRepo, sqsq.NewQueue(sqsClient, queueURL), nil, nil, nil, clk, logger, dispatch.Config{
+			Shards:   shards,
+			Location: loc,
+		})
+		if err != nil {
+			return fmt.Errorf("init immediate dispatcher: %w", err)
+		}
+		immediate = dispUC
+	}
+
 	uc, err := assignslots.New(
 		assigner,
 		reqRepo,
 		reqRepo,
 		coordRepo,
 		coordRepo,
-		assignslots.NoopImmediateDispatcher{},
+		immediate,
 		clk,
 		logger,
 		assignslots.Config{
@@ -144,7 +164,7 @@ func run(logger *slog.Logger) error {
 	return nil
 }
 
-func newDynamoClient(ctx context.Context, region, endpoint string) (*dynamodb.Client, error) {
+func newAWSClients(ctx context.Context, region, endpoint string) (*dynamodb.Client, *sqs.Client, error) {
 	opts := []func(*config.LoadOptions) error{
 		config.WithRegion(region),
 	}
@@ -153,15 +173,19 @@ func newDynamoClient(ctx context.Context, region, endpoint string) (*dynamodb.Cl
 	}
 	cfg, err := config.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("load aws config: %w", err)
+		return nil, nil, fmt.Errorf("load aws config: %w", err)
 	}
-	var ddbOpts []func(*dynamodb.Options)
-	if endpoint != "" {
-		ddbOpts = append(ddbOpts, func(o *dynamodb.Options) {
+	ddb := dynamodb.NewFromConfig(cfg, func(o *dynamodb.Options) {
+		if endpoint != "" {
 			o.BaseEndpoint = aws.String(endpoint)
-		})
-	}
-	return dynamodb.NewFromConfig(cfg, ddbOpts...), nil
+		}
+	})
+	sqsClient := sqs.NewFromConfig(cfg, func(o *sqs.Options) {
+		if endpoint != "" {
+			o.BaseEndpoint = aws.String(endpoint)
+		}
+	})
+	return ddb, sqsClient, nil
 }
 
 func envOrDefault(key, fallback string) string {
