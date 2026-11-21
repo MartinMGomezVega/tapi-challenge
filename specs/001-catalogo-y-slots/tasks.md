@@ -43,7 +43,7 @@
 **Checkpoint**: 1M de registros con slot en < 30 min (SC-003).
 
 ## Fase 5: US3 — Capacidad por proveedor (P2)
-- [ ] T023 [US3] Test: el cálculo `k × p95 > 86400 × 0,7` marca al proveedor como sobre capacidad
+- [x] T023 [US3] Test: el cálculo `k × p95 > 86400 × 0,7` marca al proveedor como sobre capacidad
 - [ ] T024 [US3] Implementar `app/capacity` + métrica EMF `ProviderOverCapacity`
 - [ ] T025 [US3] Integrar en el `reconciler` (feature 005) como paso diario
 
