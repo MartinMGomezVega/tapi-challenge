@@ -199,7 +199,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	delay := s.cfg.DefaultLatency
 	if s.cfg.LatencyJitter > 0 {
-		delay += time.Duration(rand.Int64N(int64(s.cfg.LatencyJitter)))
+		delay += time.Duration(rand.Int64N(int64(s.cfg.LatencyJitter))) //nolint:gosec // non-cryptographic mock latency jitter
 	}
 	if hasFault && rule.Delay > 0 {
 		delay = rule.Delay
@@ -264,7 +264,7 @@ func shouldApplyFault(rule FaultRule, callNum int64) bool {
 		return false
 	}
 	if rule.Rate > 0 && rule.Rate < 1 {
-		return rand.Float64() < rule.Rate
+		return rand.Float64() < rule.Rate //nolint:gosec // non-cryptographic mock fault injection
 	}
 	return true
 }

@@ -8,6 +8,7 @@ import (
 // ExecutionStatus represents the lifecycle state of a daily execution (003 FR-002).
 type ExecutionStatus string
 
+// ExecutionStatus values for the daily execution lifecycle.
 const (
 	StatusPending         ExecutionStatus = "PENDING"
 	StatusEnqueued        ExecutionStatus = "ENQUEUED"
@@ -22,6 +23,7 @@ const (
 // MaxInlineResponseBytes is the DynamoDB inline response threshold (350 KiB; items cap at 400 KB).
 const MaxInlineResponseBytes = 350 * 1024
 
+// Domain sentinel errors for execution status transitions.
 var (
 	ErrInvalidStatus     = errors.New("invalid execution status")
 	ErrInvalidTransition = errors.New("invalid execution status transition")

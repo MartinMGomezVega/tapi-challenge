@@ -17,25 +17,25 @@ import (
 )
 
 type fakeExecStore struct {
-	mu             sync.Mutex
-	outcome        execute.AcquireOutcome
-	exec           execute.Execution
-	acquireErr     error
-	completeErr    error
-	scheduleErr    error
-	failPermErr    error
-	failExhErr     error
-	skipErr        error
-	events         []string
-	completedRes   execute.Result
-	failedInfo     execute.ErrInfo
-	scheduledInfo  execute.ErrInfo
-	exhaustedInfo  execute.ErrInfo
-	skippedCalls   int
-	completeCalls  int
-	failPermCalls  int
-	failExhCalls   int
-	scheduleCalls  int
+	mu            sync.Mutex
+	outcome       execute.AcquireOutcome
+	exec          execute.Execution
+	acquireErr    error
+	completeErr   error
+	scheduleErr   error
+	failPermErr   error
+	failExhErr    error
+	skipErr       error
+	events        []string
+	completedRes  execute.Result
+	failedInfo    execute.ErrInfo
+	scheduledInfo execute.ErrInfo
+	exhaustedInfo execute.ErrInfo
+	skippedCalls  int
+	completeCalls int
+	failPermCalls int
+	failExhCalls  int
+	scheduleCalls int
 }
 
 func (f *fakeExecStore) Acquire(_ context.Context, key execute.ExecKey, owner string, ttl time.Duration, now time.Time) (execute.Execution, execute.AcquireOutcome, error) {
@@ -113,14 +113,14 @@ func (f *fakeReqGetter) Get(_ context.Context, _ string) (domain.Request, error)
 }
 
 type fakeProviderAPI struct {
-	mu           sync.Mutex
-	calls        int
-	lastReq      domain.Request
-	lastIdemKey  string
-	lastTrace    string
-	resp         execute.Response
-	err          error
-	fn           func(call int) (execute.Response, error)
+	mu          sync.Mutex
+	calls       int
+	lastReq     domain.Request
+	lastIdemKey string
+	lastTrace   string
+	resp        execute.Response
+	err         error
+	fn          func(call int) (execute.Response, error)
 }
 
 func (f *fakeProviderAPI) Call(_ context.Context, req domain.Request, idemKey, traceParent string) (execute.Response, error) {
@@ -158,13 +158,13 @@ func (f *fakeBlobStore) Put(_ context.Context, key string, data []byte) error {
 }
 
 type fakeAcker struct {
-	mu          sync.Mutex
-	acks        int
-	nacks       int
-	extends     int
-	lastDelay   time.Duration
-	lastExtend  time.Duration
-	events      *[]string
+	mu         sync.Mutex
+	acks       int
+	nacks      int
+	extends    int
+	lastDelay  time.Duration
+	lastExtend time.Duration
+	events     *[]string
 }
 
 func (f *fakeAcker) Ack(_ context.Context, _ execute.Message) error {
@@ -585,7 +585,7 @@ func TestExecute_RetryPermanentExhaustedAndInProcess(t *testing.T) {
 			},
 		}
 		acker := &fakeAcker{}
-		pol := staticPolicy{fn: func(_ error, resp execute.Response, attempts, _ int) execute.RetryDecision {
+		pol := staticPolicy{fn: func(_ error, resp execute.Response, _, _ int) execute.RetryDecision {
 			if resp.StatusCode == 200 {
 				return execute.RetryDecision{Action: execute.ActionComplete}
 			}

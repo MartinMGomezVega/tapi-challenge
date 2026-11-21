@@ -33,6 +33,7 @@ type ExecKey struct {
 // AcquireOutcome classifies the result of attempting to acquire an execution lease.
 type AcquireOutcome int
 
+// AcquireOutcome values returned by ExecutionStore.Acquire.
 const (
 	AcquireAcquired AcquireOutcome = iota
 	AcquireAlreadyTerminal
@@ -91,6 +92,7 @@ type Response struct {
 // RetryAction is the action selected by RetryPolicy.Decide.
 type RetryAction int
 
+// RetryAction values returned by RetryPolicy.Decide.
 const (
 	ActionComplete RetryAction = iota
 	ActionRetryInProcess

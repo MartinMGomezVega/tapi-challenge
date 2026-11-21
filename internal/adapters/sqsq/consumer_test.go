@@ -21,13 +21,13 @@ import (
 )
 
 type fakeSQSClient struct {
-	mu               sync.Mutex
-	batches          [][]sqstypes.Message
-	maxRequested     int32
-	receiveCalls     int
-	deleted          []string
-	visChanges       map[string][]int32
-	onReceive        func(maxMsgs int32)
+	mu           sync.Mutex
+	batches      [][]sqstypes.Message
+	maxRequested int32
+	receiveCalls int
+	deleted      []string
+	visChanges   map[string][]int32
+	onReceive    func(maxMsgs int32)
 }
 
 func (f *fakeSQSClient) ReceiveMessage(ctx context.Context, in *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {

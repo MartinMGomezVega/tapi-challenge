@@ -137,7 +137,7 @@ func (c *Consumer) Run(ctx context.Context, handler Handler) error {
 }
 
 func (c *Consumer) receiveLoop(stopCtx, execCtx context.Context, handler Handler, workWG *sync.WaitGroup) {
-	visSec := int32(c.cfg.VisibilityTimeout / time.Second)
+	visSec := durationToSQSSeconds(c.cfg.VisibilityTimeout)
 	if visSec <= 0 {
 		visSec = 60
 	}
@@ -149,11 +149,12 @@ func (c *Consumer) receiveLoop(stopCtx, execCtx context.Context, handler Handler
 			return
 		}
 
+		maxMsgs := int32(min(max(acquired, 1), sqsMaxBatchReceive)) //nolint:gosec // bounded in [1, 10]
 		out, err := c.client.ReceiveMessage(stopCtx, &sqs.ReceiveMessageInput{
-			QueueUrl:                    aws.String(c.cfg.QueueURL),
-			MaxNumberOfMessages:         int32(acquired),
-			WaitTimeSeconds:             c.cfg.WaitTimeSeconds,
-			VisibilityTimeout:           visSec,
+			QueueUrl:            aws.String(c.cfg.QueueURL),
+			MaxNumberOfMessages: maxMsgs,
+			WaitTimeSeconds:     c.cfg.WaitTimeSeconds,
+			VisibilityTimeout:   visSec,
 			MessageSystemAttributeNames: []sqstypes.MessageSystemAttributeName{
 				sqstypes.MessageSystemAttributeNameMessageGroupId,
 				sqstypes.MessageSystemAttributeNameApproximateReceiveCount,
@@ -367,13 +368,7 @@ func (c *Consumer) changeVisibility(ctx context.Context, m execute.Message, d ti
 	if m.ReceiptHandle == "" {
 		return nil
 	}
-	sec := int32(d / time.Second)
-	if sec < 0 {
-		sec = 0
-	}
-	if sec > sqsMaxVisibilitySeconds {
-		sec = sqsMaxVisibilitySeconds
-	}
+	sec := durationToSQSSeconds(d)
 	_, err := c.client.ChangeMessageVisibility(ctx, &sqs.ChangeMessageVisibilityInput{
 		QueueUrl:          aws.String(c.cfg.QueueURL),
 		ReceiptHandle:     aws.String(m.ReceiptHandle),
@@ -383,4 +378,15 @@ func (c *Consumer) changeVisibility(ctx context.Context, m execute.Message, d ti
 		return fmt.Errorf("sqs change visibility %s (%ds): %w", m.RequestID, sec, err)
 	}
 	return nil
+}
+
+func durationToSQSSeconds(d time.Duration) int32 {
+	sec := int64(d / time.Second)
+	if sec < 0 {
+		return 0
+	}
+	if sec > sqsMaxVisibilitySeconds {
+		return sqsMaxVisibilitySeconds
+	}
+	return int32(sec) //nolint:gosec // bounded in [0, 43200]
 }

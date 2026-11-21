@@ -140,7 +140,7 @@ func (c *Client) Call(ctx context.Context, req domain.Request, idemKey, tracePar
 	if err != nil {
 		return execute.Response{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseReadBytes))
 	if err != nil {
