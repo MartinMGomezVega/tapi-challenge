@@ -201,7 +201,11 @@ func (u *UseCase) Execute(ctx context.Context, msg Message) error {
 		cancel()
 		latency = time.Since(callStart)
 
-		decision = u.policy.Decide(callErr, resp, attempts+inProc, receiveCount)
+		if aware, ok := u.policy.(DurationAwareRetryPolicy); ok {
+			decision = aware.DecideWithDuration(callErr, resp, inProc+1, receiveCount, latency)
+		} else {
+			decision = u.policy.Decide(callErr, resp, attempts+inProc, receiveCount)
+		}
 		if decision.Action != ActionRetryInProcess || inProc+1 >= maxInProcessAttempts {
 			if decision.Action == ActionRetryInProcess {
 				decision.Action = ActionRetryLater
@@ -428,8 +432,5 @@ func (defaultRetryPolicy) Decide(err error, resp Response, _, receiveCount int) 
 }
 
 func truncateMessage(s string) string {
-	if len(s) <= maxErrorMsgBytes {
-		return s
-	}
-	return s[:maxErrorMsgBytes]
+	return domain.SanitizeErrorMessage(s)
 }

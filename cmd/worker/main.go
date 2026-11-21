@@ -26,6 +26,7 @@ import (
 	"github.com/martingomezvega/tapi-challenge/internal/adapters/s3blob"
 	"github.com/martingomezvega/tapi-challenge/internal/adapters/sqsq"
 	"github.com/martingomezvega/tapi-challenge/internal/app/execute"
+	"github.com/martingomezvega/tapi-challenge/internal/domain"
 	"github.com/martingomezvega/tapi-challenge/internal/platform/clock"
 )
 
@@ -125,11 +126,19 @@ func run(logger *slog.Logger) error {
 		ShutdownTimeout:   shutdownTimeout,
 	}, logger)
 
-	uc := execute.New(execRepo, reqRepo, apiClient, blobStore, consumer, nil, clk, logger, execute.Config{
+	retryPol := execute.NewDomainRetryPolicy(
+		domain.NewClassifier(nil),
+		domain.NewRetryPolicy(domain.RetryPolicyConfig{}),
+		httpapi.TranslateOutcome,
+		clk,
+	)
+	breaker := domain.NewProviderBreaker(domain.BreakerConfig{Now: clk.Now})
+
+	uc := execute.New(execRepo, reqRepo, apiClient, blobStore, consumer, retryPol, clk, logger, execute.Config{
 		OwnerID:     ownerID,
 		LeaseTTL:    time.Duration(visibilitySec) * time.Second,
 		CallTimeout: time.Duration(callTimeoutSec) * time.Second,
-	})
+	}).WithBreaker(breaker)
 	if providerRPS > 0 {
 		uc.WithLimiter(execute.NewProviderRateLimiter(providerRPS, 1))
 	}

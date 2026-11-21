@@ -379,6 +379,39 @@ func (r *ExecutionsRepo) Get(ctx context.Context, reqID string, date domain.RunD
 	return toExecuteRecord(item), true, nil
 }
 
+// ResetForRedrive transitions a FAILED_EXHAUSTED execution back to ENQUEUED while preserving historical attempts (004 US5).
+func (r *ExecutionsRepo) ResetForRedrive(ctx context.Context, reqID string, date domain.RunDate, now time.Time) error {
+	tsStr := now.UTC().Format(time.RFC3339Nano)
+	_, err := r.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:           aws.String(r.tableName),
+		Key:                 execKeyMap(reqID, date),
+		UpdateExpression:    aws.String("SET #status = :enqueued, #rds = :rds, #updated_at = :now REMOVE #owner, #expires, #completed_at"),
+		ConditionExpression: aws.String("#status = :exhausted"),
+		ExpressionAttributeNames: map[string]string{
+			"#status":       "status",
+			"#rds":          "run_date_status",
+			"#updated_at":   "updated_at",
+			"#owner":        "lease_owner",
+			"#expires":      "lease_expires_at",
+			"#completed_at": "completed_at",
+		},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":exhausted": &types.AttributeValueMemberS{Value: string(domain.StatusFailedExhausted)},
+			":enqueued":  &types.AttributeValueMemberS{Value: string(domain.StatusEnqueued)},
+			":rds":       &types.AttributeValueMemberS{Value: string(date) + "#" + string(domain.StatusEnqueued)},
+			":now":       &types.AttributeValueMemberS{Value: tsStr},
+		},
+	})
+	if err != nil {
+		var condErr *types.ConditionalCheckFailedException
+		if errors.As(err, &condErr) {
+			return nil
+		}
+		return fmt.Errorf("reset for redrive %s#%s: %w", reqID, date, err)
+	}
+	return nil
+}
+
 func (r *ExecutionsRepo) updateOwned(
 	ctx context.Context,
 	key execute.ExecKey,
