@@ -14,10 +14,10 @@
 - [x] T006 Implementar `Request` + errores de dominio tipados → `internal/domain/request.go`
 
 ## Fase 3: US1 — Slot por registro (P1) 🎯 MVP
-- [ ] T007 [US1] Test de propiedad: `Assign` es determinístico → `internal/domain/slot_test.go`
-- [ ] T008 [US1] Test de propiedad: `slot ∈ [0,1440)`, `shard ∈ [0,S)`
-- [ ] T009 [US1] Test de propiedad: uniformidad global ≤ 1,10 × promedio con 1M
-- [ ] T010 [US1] Test de propiedad: uniformidad por proveedor (`≤ ⌈k/1440⌉+1` por minuto) y k < 1440 equiespaciado
+- [x] T007 [US1] Test de propiedad: `Assign` es determinístico → `internal/domain/slot_test.go`
+- [x] T008 [US1] Test de propiedad: `slot ∈ [0,1440)`, `shard ∈ [0,S)`
+- [x] T009 [US1] Test de propiedad: uniformidad global ≤ 1,10 × promedio con 1M
+- [x] T010 [US1] Test de propiedad: uniformidad por proveedor (`≤ ⌈k/1440⌉+1` por minuto) y k < 1440 equiespaciado
 - [ ] T011 [US1] Implementar `SlotAssigner` (offset + rank) → `internal/domain/slot.go`
 - [ ] T012 [US1] Test: asignación incremental elige el minuto de menor ocupación
 - [ ] T013 [US1] Implementar asignación incremental con histograma
