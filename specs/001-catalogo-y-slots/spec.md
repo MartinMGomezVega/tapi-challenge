@@ -50,9 +50,10 @@ Como equipo, necesito saber si algún proveedor no puede completar su volumen di
 - **FR-001**: El sistema DEBE asignar a cada registro un `slot ∈ [0,1440)` determinístico.
 - **FR-002**: La asignación DEBE ser uniforme a nivel global y por proveedor (criterios de US1).
 - **FR-003**: El sistema DEBE asignar `shard = hash(id) mod S`, con S configurable.
-- **FR-004**: El sistema DEBE exponer la consulta "registros habilitados del slot X, shard Y" sin `Scan` (GSI `slot_shard`).
-- **FR-005**: El backfill DEBE ser idempotente, reanudable y con rate limit configurable de WCU.
-- **FR-006**: El sistema DEBE validar diariamente la capacidad por proveedor (US3).
+- **FR-004**: El sistema DEBE exponer la consulta "registros habilitados del slot X, shard Y" sin `Scan` (GSI `gsi_slot_shard`).
+- **FR-004b**: El sistema DEBE exponer la consulta ordenada de registros por proveedor sin `Scan` (GSI `gsi_provider`: `PK provider`, `SK id`, `KEYS_ONLY`), permitiendo calcular `rank` en streaming con memoria acotada a `O(k_max)` (independiente de `N`).
+- **FR-005**: El backfill DEBE ser idempotente, reanudable por checkpoint `(proveedor, cursor)`, paralelizado por proveedor con rate limit configurable de WCU, y persistir el registro de proveedores (`k` e histograma) en `coordination`. Si un proveedor acumula `> 1440` registros nuevos desde el último backfill, se rebalancea completo; con `≤ 1440`, se aplica asignación incremental por histograma.
+- **FR-006**: El sistema DEBE validar diariamente la capacidad por proveedor (US3) a partir del registro de proveedores en `coordination`.
 - **FR-007**: Los registros DEBEN validarse en el alta: `endpoint` relativo a una allowlist y `body` como JSON válido de ≤ 256 KB.
 
 ### Key Entities

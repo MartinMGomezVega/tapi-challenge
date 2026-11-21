@@ -9,7 +9,7 @@
 | R3 | **Guardar el resultado** en una base de datos | Tabla `executions` (DynamoDB). Las respuestas de más de 350 KB se guardan en S3 con un puntero | 003 |
 | R4 | Errores **reintentables y no reintentables** | Clasificador de errores + backoff exponencial con jitter + `ChangeMessageVisibility` + DLQ + circuit breaker por proveedor | 004 |
 | R5 | **Evitar concurrencia a un mismo proveedor** | SQS FIFO con `MessageGroupId = provider` (garantía de la infraestructura) + lease de ejecución en DynamoDB (defensa en profundidad) | 003 |
-| C1 | **1M de filas, escalando N veces** | Sin `Scan` en el camino crítico: GSI `slot#shard`, shards configurables, workers con autoscaling. Capacidad calculada en la sección 4 | 001, 002, 006 |
+| C1 | **1M de filas, escalando N veces** | Cero `Scan` (ni en runtime ni en backfill): GSI `gsi_slot_shard` (shards configurables) + GSI `gsi_provider` (backfill en streaming `O(k_max)`), workers con autoscaling. Capacidad calculada en la sección 4 | 001, 002, 006 |
 | C2 | **Misma región y misma cuenta de AWS** | Acceso privado por VPC endpoints, IAM sin cross-account, **cuotas compartidas** (ver C3). Una sola región: alta disponibilidad multi-AZ y DR con PITR (sección 6) | 006 |
 | C3 | La API interna **ejecuta dos lambdas** | Cada consulta consume ~2 unidades de la **concurrencia de Lambda de la cuenta**, compartida con todo lo demás. Los workers corren en ECS (no compiten) y tienen un **presupuesto global de llamadas en vuelo** derivado de esa cuota. Timeouts que contemplan cold starts y la cadena de dos lambdas | 003, 004, 006 |
 | T1 | **Todo el stack de AWS** | ECS Fargate, SQS FIFO, DynamoDB, EventBridge Scheduler, S3, CloudWatch, X-Ray, KMS, ECR, Terraform | 006 |
@@ -28,7 +28,7 @@ flowchart LR
 
     EBS["EventBridge Scheduler<br/>(cron diario)"] -->|RunTask| R
 
-    REQ[("DynamoDB<br/>requests<br/>GSI slot#shard")]
+    REQ[("DynamoDB<br/>requests<br/>GSIs: slot#shard, provider")]
     EXE[("DynamoDB<br/>executions<br/>PK request_id, SK run_date")]
     COORD[("DynamoDB<br/>coordination<br/>lease líder + watermark")]
     Q[["SQS FIFO<br/>MessageGroupId = provider<br/>DedupId = request_id#run_date"]]
@@ -134,8 +134,8 @@ Supuestos: latencia p95 de la API (dos lambdas en cadena) `L = 400 ms`; factor d
 **Consecuencia aceptada**: hay *head-of-line blocking* por proveedor. Si un proveedor falla, se frenan sólo sus mensajes (backpressure deseado) y no los de los demás.
 
 ### ADR-004 — Distribución temporal por slots precalculados
-**Decisión**: `slot = f(provider, id) ∈ [0, 1440)`, asignado al alta del registro con reparto uniforme por proveedor. GSI `slot#shard`. Un ticker de un minuto con *watermark* y catch-up.
-**Alternativas**: un schedule de EventBridge por registro (1M schedules, cuotas y costo, no resuelve la exclusividad) o un `Scan` diario particionado (pico de carga, no reparte en el día).
+**Decisión**: `slot = f(provider, id) ∈ [0, 1440)`, asignado con reparto uniforme por proveedor. Dos GSIs en `requests`: `gsi_slot_shard` (`PK slot_shard`, `SK provider_id`, `INCLUDE`) para despacho y reconciliación; y `gsi_provider` (`PK provider`, `SK id`, `KEYS_ONLY`) para backfill en streaming ordenado por `SK` sin `Scan` ni sort en memoria (`O(k_max)` en RAM, independiente de `N`). El registro de proveedores (`k` e histograma) vive en `coordination` (usado por backfill, altas incrementales con umbral `> 1440` y validación de capacidad). Un ticker de un minuto con *watermark* y catch-up.
+**Alternativas**: un schedule de EventBridge por registro (1M schedules, cuotas y costo, no resuelve la exclusividad), un `Scan` diario particionado (pico de carga, no reparte en el día), o agrupar/ordenar en memoria durante el backfill (~16 GB con 100M registros, viola escalabilidad `O(1)` en memoria respecto de `N`).
 
 ### ADR-005 — Idempotencia en 4 capas con la clave `request_id#run_date`
 1) `MessageDeduplicationId` de SQS; 2) `PutItem` condicional de PENDING en el dispatcher (patrón outbox-like); 3) transiciones condicionales y lease en el worker; 4) header `Idempotency-Key` hacia la API.
