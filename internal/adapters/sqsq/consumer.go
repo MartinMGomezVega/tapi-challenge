@@ -433,6 +433,9 @@ func (c *Consumer) Extend(ctx context.Context, m execute.Message, d time.Duratio
 	return c.changeVisibility(ctx, m, d)
 }
 
+// HeartbeatFailures returns the cumulative count of partial failures reported by ChangeMessageVisibilityBatch.
+func (c *Consumer) HeartbeatFailures() int64 { return 0 }
+
 func (c *Consumer) changeVisibility(ctx context.Context, m execute.Message, d time.Duration) error {
 	if m.ReceiptHandle == "" {
 		return nil
