@@ -124,4 +124,3 @@ jobs:
           directory: deploy/terraform
           framework: terraform
           soft_fail: false
-          skip_check: CKV_AWS_144,CKV_AWS_18,CKV2_AWS_62

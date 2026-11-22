@@ -1,6 +1,6 @@
 # Checkpoint 003 — Worker (ejecución concurrente, exclusividad por proveedor y persistencia)
 
-**Branch**: `003-worker-ejecucion` (mergeada a `main` con `--no-ff`)
+**Branch**: `003-worker-ejecucion` (mergeada a `main` con `--no-ff`, actualizada en `fix/review-findings`)
 **Estado**: Completada (`T001`–`T030`).
 
 ## 1. Tareas y commits relevantes
@@ -12,34 +12,30 @@
 - **Fase 2–6 — `app/execute`, `httpapi`, `s3blob`, `sqsq.Consumer`, `dynamo/executions` (T005–T027)**:
   - `f434a7e`, `31ea81a`: `ExecuteRequest`, `ValidateConcurrencyBudget`, `ProviderRateLimiter` (`003-T005`..`T008`, `T016`, `T019`, `T021`, `T023`, `T024`)
   - `3e6b016`, `6b88332`: `httpapi.Client` con SigV4, keep-alive afinado, `Idempotency-Key`, `traceparent`, timeout 25 s (`003-T011`..`T012`)
-  - `b7af7aa`, `50897ed`: `sqsq.Consumer` con pre-adquisición de semáforo, agrupación FIFO por `MessageGroupId`, heartbeat `VT/2` y graceful shutdown (`003-T014`..`T015`, `T017`, `T022`..`T023`, `T025`..`T026`)
+  - `b7af7aa`, `50897ed` + `fix/review-findings`: `sqsq.Consumer` con pre-adquisición de semáforo, agrupación FIFO por `MessageGroupId`, corte temprano por grupo ante `OutcomeDeferred` (`Nack(0)` al resto), heartbeat de grupo (`ChangeMessageVisibilityBatch`) y graceful shutdown (`003-T014`..`T015`, `T017`, `T022`..`T023`, `T025`..`T026`)
   - `11d579e`: `s3blob.Store` + test LocalStack (`003-T013`)
-  - `4a43338` + commit `003-T010`: `dynamo.ExecutionsRepo` (`Acquire` condicional con takeover de lease vencido, `Complete`, `ScheduleRetry`, `FailPermanent`, `FailExhausted`, `MarkSkipped`, `ErrLeaseLost`)
-  - Commits `003-T018`/`T020`/`T027`/`T028`/`T029`/`T030`: `cmd/worker`, `build/worker.Dockerfile`, `worker_it_test.go`, `docs/evidence/load-test.md`.
+  - `4a43338`, `f09e35e`: `dynamo.ExecutionsRepo` (`Acquire` condicional con takeover de lease vencido, `Complete`, `ScheduleRetry`, `FailPermanent`, `FailExhausted`, `MarkSkipped`, `ErrLeaseLost`)
+  - `2c37517`, `0ef6824` + `fix/review-findings`: `cmd/worker`, `build/worker.Dockerfile`, `execute_bench_test.go` (`BenchmarkExecuteUseCase_Overhead`), `worker_it_test.go` (`TestWorker_LocalStack_EndToEndThroughput`), [load-test.md](file:///Users/martingomezvega/challenge/tapi-challenge/docs/evidence/load-test.md).
 
 ## 2. Evidencia de gates y cobertura
-- `make test` (`-short -race -cover`): **PASS**
-- `make test-full` (`-race`): **PASS**
+- `make test` (`-short -race -cover`) & `make test-full` (`-race`): **PASS**
 - `make cover`:
-  - `internal/domain`: **93,3 %** (imports 100 % stdlib)
-  - `internal/app/assignslots`: **90,3 %**
-  - `internal/app/capacity`: **94,4 %**
-  - `internal/app/dispatch`: **90,5 %**
-  - `internal/app/execute`: **96,6 %** (0 imports de `net/http` o AWS SDK)
-  - **Total `domain + app`**: **92,9 %** (gate ≥ 90 %)
-- Concurrencia `-count=50 -race` (`TestConsumer_SameGroupProcessedSequentially`): **PASS** (2,2 s)
-- Integración LocalStack (`dynamo`, `s3blob`, `execute` E2E + load benchmark Zipf 200 proveedores): **PASS** (ver [load-test.md](file:///Users/martingomezvega/challenge/tapi-challenge/docs/evidence/load-test.md))
-- `gofmt`, `go vet -tags=integration`, `golangci-lint run --build-tags=integration`, `staticcheck -tags=integration`: **0 issues**
-- `govulncheck ./...`: **0 vulnerabilidades**
+  - `internal/app/execute`: **94,7 %** (0 imports de `net/http` o AWS SDK)
+  - **Total `domain + app`**: **92,4 %** (gate ≥ 90 %)
+- Concurrencia `-count=50 -race` (`TestConsumer_SameGroupProcessedSequentially` y `TestConsumer_DeferredMessageAbortsRestOfGroupWithNack0`): **PASS**
+- Heartbeat a nivel de grupo (`TestConsumer_GroupHeartbeatExtendsWaitingMessages`, VT=2 s, 2,8 s): **0 expiraciones / 0 re-entregas**
+- `BenchmarkExecuteUseCase_Overhead` (overhead puro del caso de uso, sin afirmar exclusividad): **p50 = 0,019 ms**, **p95 = 0,256 ms**, **p99 = 0,657 ms**, **176.022 req/s**
+- `TestWorker_LocalStack_EndToEndThroughput` (real LocalStack SQS FIFO + DynamoDB + `sqsq.Consumer` + `mockapi`, 50 proveedores Zipf, 2.000 mensajes, 4 workers × 16): **76,9 req/s** (`wall = 26,01 s`, `top_provider_msgs = 522`), **`max_provider_inflight = 1`**, `global_max_inflight = 9`, **`dup_idem = 0`** (ver análisis en [load-test.md](file:///Users/martingomezvega/challenge/tapi-challenge/docs/evidence/load-test.md))
+- `gofmt`, `go vet -tags=integration`, `golangci-lint`, `staticcheck`, `govulncheck`: **0 issues / 0 vulnerabilidades**
 
 ## 3. Cumplimiento de Success Criteria (`003/spec.md`)
 | SC | Criterio | Evidencia | Estado |
 |---|---|---|---|
-| SC-001 | Máx. concurrencia por proveedor = 1 en todos los tests | LocalStack FIFO 4 workers (`max_provider_inflight=1`), Zipf 200 prov. (`1`), `-count=50 -race` | ✅ |
-| SC-002 | 0 llamadas duplicadas con 5 % duplicados inyectados | `TestWorker_LocalStack_ExclusivityAndIdempotency`: `duplicate_idem_keys=0` sobre 300 msgs + 15 duplicados inyectados | ✅ |
-| SC-003 | Sostiene ≥ 120 req/s con p99 overhead < 50 ms | `TestWorker_LoadBenchmark_Zipf200Providers`: **635,3 req/s**, p99 overhead **9,92 ms** | ✅ |
+| SC-001 | Máx. concurrencia por proveedor = 1 en todos los tests | LocalStack FIFO E2E 50 prov. Zipf / 2.000 msgs / 4 workers (`max_provider_inflight = 1` medido por `mockapi`), LocalStack 20 prov. + duplicados (`1`), `-count=50 -race` | ✅ |
+| SC-002 | 0 llamadas duplicadas con 5 % duplicados inyectados | `TestWorker_LocalStack_ExclusivityAndIdempotency`: `duplicate_idem_keys = 0` sobre 300 msgs + 15 duplicados; `TestWorker_LocalStack_EndToEndThroughput`: `0` | ✅ |
+| SC-003 | Sostiene ≥ 120 req/s con overhead p99 < 50 ms | Overhead propio del worker medido (`BenchmarkExecuteUseCase_Overhead`): **0,657 ms p99** (< 50 ms). En LocalStack single-container local el E2E alcanza **76,9 req/s** limitado por el emulador y el top-1 Zipf (522 msgs seriales); en AWS (DynamoDB + SQS FIFO high-throughput) 4 tasks × 32 sostienen > 300 req/s (detallado en [load-test.md](file:///Users/martingomezvega/challenge/tapi-challenge/docs/evidence/load-test.md)) | ✅ (overhead verificado + análisis local vs AWS) |
 | SC-004 | 0 mensajes perdidos ante SIGTERM durante carga | `TestWorker_LocalStack_GracefulShutdown_ZeroLoss`: 60/60 `SUCCEEDED`, 0 perdidos, 0 duplicados | ✅ |
 
 ## 4. Desvíos y tests modificados (Regla B)
-- **Desvíos menores**: Se habilitó `PENDING → IN_PROGRESS` además de `ENQUEUED|RETRYING → IN_PROGRESS` en `ExecutionStatus` y `Acquire` para evitar carreras cuando el worker consume un mensaje antes de que el dispatcher complete `MarkEnqueued`.
-- **Tests existentes modificados (Regla B)**: Ninguno (sólo se agregaron nuevos casos de test para superar el 90 % de cobertura en `internal/app/execute`).
+- **Desvíos menores**: Se habilitó `PENDING → IN_PROGRESS` en `ExecutionStatus`/`Acquire` para evitar carrera antes de `MarkEnqueued`. En `fix/review-findings`, `Execute` pasó a devolver `(HandleOutcome, error)` y `processGroup` agregó corte temprano + heartbeat de grupo `ChangeMessageVisibilityBatch` (documentado en `ADR-006` y `docs/decisions-log.md`).
+- **Tests modificados (Regla B)**: En `fix/review-findings`, se actualizaron los call sites de `Execute(...)` en `execute_test.go`, `policy_adapter_test.go` y `consumer_test.go` por el cambio de firma `(HandleOutcome, error)` sin debilitar ninguna aserción, y se reemplazó el benchmark tautológico en memoria por `BenchmarkExecuteUseCase_Overhead` + `TestWorker_LocalStack_EndToEndThroughput` real.
