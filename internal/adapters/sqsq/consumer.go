@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -24,6 +25,7 @@ const (
 	defaultWaitTimeSeconds   = 20
 	defaultVisibilityTimeout = 60 * time.Second
 	defaultShutdownTimeout   = 25 * time.Second
+	minHeartbeatInterval     = 100 * time.Millisecond
 	sqsMaxBatchReceive       = 10
 	sqsMaxVisibilitySeconds  = 43200 // 12 hours SQS hard limit
 )
@@ -33,11 +35,13 @@ type SQSAPI interface {
 	ReceiveMessage(ctx context.Context, params *sqs.ReceiveMessageInput, optFns ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error)
 	DeleteMessage(ctx context.Context, params *sqs.DeleteMessageInput, optFns ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error)
 	ChangeMessageVisibility(ctx context.Context, params *sqs.ChangeMessageVisibilityInput, optFns ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityOutput, error)
+	ChangeMessageVisibilityBatch(ctx context.Context, params *sqs.ChangeMessageVisibilityBatchInput, optFns ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityBatchOutput, error)
 }
 
-// Handler processes one SQS FIFO message.
+// Handler processes one SQS FIFO message and reports whether the group batch may continue (OutcomeDone)
+// or must release remaining queued messages in the same MessageGroupId (OutcomeDeferred).
 type Handler interface {
-	Execute(ctx context.Context, msg execute.Message) error
+	Execute(ctx context.Context, msg execute.Message) (execute.HandleOutcome, error)
 }
 
 // ConsumerConfig configures the SQS FIFO consumer pipeline (003 FR-001, FR-005, US4, US5).
@@ -52,7 +56,8 @@ type ConsumerConfig struct {
 
 // Consumer polls SQS FIFO, pre-acquires semaphore slots before ReceiveMessage,
 // groups batches by MessageGroupId for sequential per-provider execution,
-// runs visibility heartbeats, and shuts down gracefully.
+// runs group-level visibility heartbeats, aborts a group batch on OutcomeDeferred,
+// and shuts down gracefully.
 type Consumer struct {
 	client SQSAPI
 	cfg    ConsumerConfig
@@ -197,7 +202,6 @@ func (c *Consumer) receiveLoop(stopCtx, execCtx context.Context, handler Handler
 }
 
 func (c *Consumer) acquireSlots(ctx context.Context) (int, bool) {
-	// Wait for the first slot.
 	select {
 	case <-ctx.Done():
 		return 0, false
@@ -224,53 +228,83 @@ func (c *Consumer) releaseSlots(n int) {
 }
 
 func (c *Consumer) processGroup(stopCtx, execCtx context.Context, rawMsgs []sqstypes.Message, handler Handler) {
+	// Parse upfront; delete poison messages immediately and release their semaphore slots.
+	items := make([]execute.Message, 0, len(rawMsgs))
 	for _, raw := range rawMsgs {
-		func(m sqstypes.Message) {
-			defer c.releaseSlots(1)
+		msg, err := parseMessage(raw)
+		if err != nil {
+			c.logger.Error("malformed sqs message body, deleting poison message", "error", err)
+			_ = c.Ack(execCtx, execute.Message{ReceiptHandle: aws.ToString(raw.ReceiptHandle)})
+			c.releaseSlots(1)
+			continue
+		}
+		items = append(items, msg)
+	}
+	if len(items) == 0 {
+		return
+	}
 
-			msg, err := parseMessage(m)
-			if err != nil {
-				c.logger.Error("malformed sqs message body, deleting poison message", "error", err)
-				_ = c.Ack(execCtx, execute.Message{ReceiptHandle: aws.ToString(m.ReceiptHandle)})
-				return
-			}
+	// Group-level visibility heartbeat every VT/2 extending BOTH the active message and all waiting
+	// messages in this MessageGroupId batch via ChangeMessageVisibilityBatch (ADR-006).
+	var activeIdx atomic.Int32
+	hbCtx, stopHB := context.WithCancel(execCtx)
+	hbDone := make(chan struct{})
+	go func() {
+		defer close(hbDone)
+		c.runGroupHeartbeat(hbCtx, items, &activeIdx)
+	}()
 
-			// Graceful shutdown (003 US5): do not start queued messages after SIGTERM; release immediately.
-			if stopCtx.Err() != nil {
-				if nackErr := c.Nack(execCtx, msg, 0); nackErr != nil {
-					c.logger.Warn("failed to nack pending message during shutdown",
-						"request_id", msg.RequestID, "error", nackErr)
-				}
-				return
-			}
-
-			// Visibility heartbeat every VT/2 for long-running calls (003 FR-005).
-			hbCtx, stopHB := context.WithCancel(execCtx)
-			hbDone := make(chan struct{})
-			go func() {
-				defer close(hbDone)
-				c.runHeartbeat(hbCtx, msg)
-			}()
-
-			err = handler.Execute(execCtx, msg)
+	hbStopped := false
+	haltHeartbeat := func() {
+		if !hbStopped {
 			stopHB()
 			<-hbDone
+			hbStopped = true
+		}
+	}
+	defer haltHeartbeat()
 
-			if err != nil && !errors.Is(err, context.Canceled) {
-				c.logger.Warn("message handler returned error",
-					"request_id", msg.RequestID,
-					"provider", msg.Provider,
-					"error", err)
+	releaseRemaining := func(from int, reason string) {
+		// Stop group heartbeat BEFORE releasing pending items so no heartbeat races with Nack(0).
+		haltHeartbeat()
+		for j := from; j < len(items); j++ {
+			if nackErr := c.Nack(execCtx, items[j], 0); nackErr != nil {
+				c.logger.Warn("failed to release pending message",
+					"reason", reason, "request_id", items[j].RequestID, "error", nackErr)
 			}
-		}(raw)
+			c.releaseSlots(1)
+		}
+	}
+
+	for i, msg := range items {
+		// Graceful shutdown (003 US5): do not start queued messages after SIGTERM; release immediately.
+		if stopCtx.Err() != nil {
+			releaseRemaining(i, "shutdown")
+			return
+		}
+
+		outcome, err := handler.Execute(execCtx, msg)
+		activeIdx.Store(int32(i + 1)) //nolint:gosec // len(items) <= 10
+		c.releaseSlots(1)
+
+		if err != nil && !errors.Is(err, context.Canceled) {
+			c.logger.Warn("message handler returned error",
+				"request_id", msg.RequestID,
+				"provider", msg.Provider,
+				"error", err)
+		}
+
+		// Intra-batch backoff/defer isolation (ADR-006): stop hitting a degraded provider
+		// and immediately release the remaining queued messages of this group with Nack(0).
+		if outcome == execute.OutcomeDeferred {
+			releaseRemaining(i+1, "deferred")
+			return
+		}
 	}
 }
 
-func (c *Consumer) runHeartbeat(ctx context.Context, msg execute.Message) {
-	interval := c.cfg.VisibilityTimeout / 2
-	if interval < time.Second {
-		interval = time.Second
-	}
+func (c *Consumer) runGroupHeartbeat(ctx context.Context, items []execute.Message, activeIdx *atomic.Int32) {
+	interval := max(c.cfg.VisibilityTimeout/2, minHeartbeatInterval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -279,12 +313,47 @@ func (c *Consumer) runHeartbeat(ctx context.Context, msg execute.Message) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := c.Extend(ctx, msg, c.cfg.VisibilityTimeout); err != nil && ctx.Err() == nil {
-				c.logger.Warn("visibility heartbeat failed",
-					"request_id", msg.RequestID, "provider", msg.Provider, "error", err)
+			idx := int(activeIdx.Load())
+			if idx >= len(items) {
+				return
+			}
+			if err := c.extendBatch(ctx, items[idx:], c.cfg.VisibilityTimeout); err != nil && ctx.Err() == nil {
+				c.logger.Warn("group visibility heartbeat failed",
+					"provider", items[idx].Provider, "pending_count", len(items)-idx, "error", err)
 			}
 		}
 	}
+}
+
+func (c *Consumer) extendBatch(ctx context.Context, msgs []execute.Message, d time.Duration) error {
+	if len(msgs) == 0 {
+		return nil
+	}
+	sec := durationToSQSSeconds(d)
+	for start := 0; start < len(msgs); start += sqsMaxBatchReceive {
+		end := min(start+sqsMaxBatchReceive, len(msgs))
+		entries := make([]sqstypes.ChangeMessageVisibilityBatchRequestEntry, 0, end-start)
+		for i, m := range msgs[start:end] {
+			if m.ReceiptHandle == "" {
+				continue
+			}
+			entries = append(entries, sqstypes.ChangeMessageVisibilityBatchRequestEntry{
+				Id:                aws.String(strconv.Itoa(i)),
+				ReceiptHandle:     aws.String(m.ReceiptHandle),
+				VisibilityTimeout: sec,
+			})
+		}
+		if len(entries) == 0 {
+			continue
+		}
+		if _, err := c.client.ChangeMessageVisibilityBatch(ctx, &sqs.ChangeMessageVisibilityBatchInput{
+			QueueUrl: aws.String(c.cfg.QueueURL),
+			Entries:  entries,
+		}); err != nil {
+			return fmt.Errorf("sqs change visibility batch (%d entries, %ds): %w", len(entries), sec, err)
+		}
+	}
+	return nil
 }
 
 func groupByMessageGroup(msgs []sqstypes.Message) (map[string][]sqstypes.Message, []string) {

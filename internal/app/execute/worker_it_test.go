@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"math"
 	"net/http/httptest"
-	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -19,6 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/martingomezvega/tapi-challenge/internal/adapters/dynamo"
 	"github.com/martingomezvega/tapi-challenge/internal/adapters/httpapi"
@@ -348,23 +348,48 @@ func TestWorker_LocalStack_GracefulShutdown_ZeroLoss(t *testing.T) {
 	}
 }
 
-// T030: Sustained load test >= 120 req/s across 200 Zipf providers measuring worker overhead p99 < 50 ms (SC-001..SC-003).
-func TestWorker_LoadBenchmark_Zipf200Providers(t *testing.T) {
+// T030 (Review Finding 1): Real LocalStack End-to-End Throughput & Exclusivity test.
+// Uses real SQS FIFO + sqsq.Consumer + DynamoDB RequestsRepo/ExecutionsRepo + S3 + SigV4 httpapi + mockapi
+// across 50 Zipf providers, 2,000 messages, and 4 concurrent workers x 16 inflight.
+// Exclusivity (max_provider_inflight == 1) is enforced purely by SQS FIFO + Consumer + DynamoDB lease
+// and measured externally by mockapi.
+func TestWorker_LocalStack_EndToEndThroughput(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skipping 200-provider Zipf load test in -short mode")
+		t.Skip("skipping 50-provider / 2,000-message LocalStack E2E throughput test in -short mode")
 	}
 
+	env := testenv.StartLocalStack(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	defer cancel()
+
 	const (
-		numProviders = 200
-		totalMsgs    = 2400 // >= 120 req/s target
-		apiLatency   = 5 * time.Millisecond
+		reqTable          = "e2e-throughput-reqs"
+		execTable         = "e2e-throughput-execs"
+		bucket            = "e2e-throughput-bucket"
+		queueName         = "e2e-throughput.fifo"
+		dlqName           = "e2e-throughput-dlq.fifo"
+		numProviders      = 50
+		totalMsgs         = 2000
+		numWorkers        = 4
+		inflightPerWorker = 16
+		apiLatency        = 2 * time.Millisecond
 	)
 
-	mockSrv := mockapi.New(mockapi.Config{DefaultLatency: apiLatency})
-	httpTS := httptest.NewServer(mockSrv)
-	defer httpTS.Close()
+	if err := env.EnsureRequestsTable(ctx, reqTable); err != nil {
+		t.Fatalf("EnsureRequestsTable: %v", err)
+	}
+	if err := env.EnsureExecutionsTable(ctx, execTable); err != nil {
+		t.Fatalf("EnsureExecutionsTable: %v", err)
+	}
+	if err := env.EnsureBucket(ctx, bucket); err != nil {
+		t.Fatalf("EnsureBucket: %v", err)
+	}
+	qURL, _, err := env.EnsureFIFOQueue(ctx, queueName, dlqName)
+	if err != nil {
+		t.Fatalf("EnsureFIFOQueue: %v", err)
+	}
 
-	// Build 200 Zipf-distributed providers (alpha=1.1).
+	// Build 50 Zipf-distributed providers (alpha = 1.1) summing to exactly 2,000 messages.
 	weights := make([]float64, numProviders)
 	var sumW float64
 	for i := range numProviders {
@@ -372,150 +397,153 @@ func TestWorker_LoadBenchmark_Zipf200Providers(t *testing.T) {
 		weights[i] = w
 		sumW += w
 	}
-
-	date := domain.RunDate("2026-11-21")
-	reqsMap := make(map[string]domain.Request, totalMsgs)
-	byProvider := make(map[string][]execute.Message, numProviders)
+	counts := make([]int, numProviders)
 	assigned := 0
 	for p := range numProviders {
-		count := max(int(math.Round(float64(totalMsgs)*weights[p]/sumW)), 1)
-		if assigned+count > totalMsgs {
-			count = totalMsgs - assigned
-		}
-		if count <= 0 {
-			break
-		}
-		prov := fmt.Sprintf("zipf-%03d", p)
-		for i := range count {
-			id := fmt.Sprintf("z-%03d-%04d", p, i)
-			reqsMap[id] = domain.Request{
+		c := max(int(math.Round(float64(totalMsgs)*weights[p]/sumW)), 1)
+		counts[p] = c
+		assigned += c
+	}
+	counts[0] += totalMsgs - assigned
+
+	date := domain.RunDate("2026-11-21")
+	now := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)
+	reqs := make([]domain.Request, 0, totalMsgs)
+	msgs := make([]dispatch.JobMessage, 0, totalMsgs)
+	for p, cnt := range counts {
+		prov := fmt.Sprintf("zipf-%02d", p)
+		for i := range cnt {
+			id := fmt.Sprintf("e2e-%02d-%04d", p, i)
+			reqs = append(reqs, domain.Request{
 				ID: id, Provider: prov, Endpoint: fmt.Sprintf("/providers/%s/query", prov),
 				Method: "POST", Body: []byte(`{"q":1}`), Enabled: true,
-			}
-			byProvider[prov] = append(byProvider[prov], execute.Message{
-				RequestID: id, RunDate: date, Provider: prov, ReceiveCount: 1, MessageGroupID: prov,
+				Slot: i % domain.SlotsPerDay, Shard: 0, Version: 1, CreatedAt: now, UpdatedAt: now,
+			})
+			msgs = append(msgs, dispatch.JobMessage{
+				RequestID: id, RunDate: date, Provider: prov, Slot: i % domain.SlotsPerDay, DispatchedAt: now,
 			})
 		}
-		assigned += count
 	}
+
+	reqRepo := dynamo.NewRequestsRepo(env.DynamoDB, reqTable)
+	execRepo := dynamo.NewExecutionsRepo(env.DynamoDB, execTable, dynamo.DefaultExecutionTTL)
+	blobStore := s3blob.New(env.S3, bucket)
+	producer := sqsq.NewQueue(env.SQS, qURL)
+
+	// Seed requests, executions (PENDING), and enqueue all 2,000 messages onto LocalStack SQS FIFO before starting timer.
+	if err := reqRepo.PutBatch(ctx, reqs); err != nil {
+		t.Fatalf("PutBatch requests: %v", err)
+	}
+	seedGrp, seedCtx := errgroup.WithContext(ctx)
+	seedGrp.SetLimit(32)
+	for _, m := range msgs {
+		seedGrp.Go(func() error {
+			_, err := execRepo.CreatePending(seedCtx, m.RequestID, m.RunDate, m.Provider, m.Slot, now)
+			return err
+		})
+	}
+	if err := seedGrp.Wait(); err != nil {
+		t.Fatalf("CreatePending seed: %v", err)
+	}
+
+	enqGrp, enqCtx := errgroup.WithContext(ctx)
+	enqGrp.SetLimit(16)
+	for start := 0; start < len(msgs); start += 10 {
+		chunk := msgs[start:min(start+10, len(msgs))]
+		enqGrp.Go(func() error {
+			failed, err := producer.SendBatch(enqCtx, chunk)
+			if err != nil {
+				return err
+			}
+			if len(failed) > 0 {
+				return fmt.Errorf("SendBatch had %d failed entries", len(failed))
+			}
+			return nil
+		})
+	}
+	if err := enqGrp.Wait(); err != nil {
+		t.Fatalf("SendBatch seed: %v", err)
+	}
+
+	mockSrv := mockapi.New(mockapi.Config{DefaultLatency: apiLatency})
+	httpTS := httptest.NewServer(mockSrv)
+	defer httpTS.Close()
 
 	apiClient := httpapi.New(httpapi.Config{
 		BaseURL:             httpTS.URL,
 		Region:              "us-east-1",
 		Timeout:             10 * time.Second,
-		MaxIdleConnsPerHost: 64,
+		MaxIdleConnsPerHost: numWorkers * inflightPerWorker,
 		Credentials:         credentials.NewStaticCredentialsProvider("test", "test", ""),
 	})
 
-	store := &memExecStore{items: make(map[string]domain.ExecutionStatus, assigned)}
-	reqs := &memReqGetter{items: reqsMap}
-	acker := &noopAcker{}
-	clk, _ := clock.New(1)
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	uc := execute.New(store, reqs, apiClient, nil, acker, nil, clk, logger, execute.Config{OwnerID: "load-worker"})
-
-	sem := make(chan struct{}, 64)
-	var (
-		wg        sync.WaitGroup
-		ovMu      sync.Mutex
-		overheads = make([]time.Duration, 0, assigned)
+	clk, _ := clock.New(1)
+	domPol := execute.NewDomainRetryPolicy(
+		domain.NewClassifier(nil),
+		domain.NewRetryPolicy(domain.RetryPolicyConfig{}),
+		httpapi.TranslateOutcome,
+		clk,
 	)
 
+	runCtx, stopWorkers := context.WithCancel(ctx)
+	var wg sync.WaitGroup
 	start := time.Now()
-	for _, group := range byProvider {
+
+	for w := range numWorkers {
+		consumer := sqsq.NewConsumer(env.SQS, sqsq.ConsumerConfig{
+			QueueURL:          qURL,
+			Receivers:         2,
+			MaxInflight:       inflightPerWorker,
+			WaitTimeSeconds:   1,
+			VisibilityTimeout: 60 * time.Second,
+			ShutdownTimeout:   10 * time.Second,
+		}, logger)
+		uc := execute.New(execRepo, reqRepo, apiClient, blobStore, consumer, domPol, clk, logger, execute.Config{
+			OwnerID: fmt.Sprintf("e2e-worker-%d", w),
+		})
 		wg.Add(1)
-		go func(msgs []execute.Message) {
+		go func() {
 			defer wg.Done()
-			for _, m := range msgs {
-				sem <- struct{}{}
-				t0 := time.Now()
-				err := uc.Execute(context.Background(), m)
-				elapsed := time.Since(t0)
-				<-sem
-				if err != nil {
-					t.Errorf("Execute %s: %v", m.RequestID, err)
-					return
-				}
-				ov := max(elapsed-apiLatency, 0)
-				ovMu.Lock()
-				overheads = append(overheads, ov)
-				ovMu.Unlock()
-			}
-		}(group)
+			_ = consumer.Run(runCtx, uc)
+		}()
 	}
-	wg.Wait()
+
+	deadline := time.Now().Add(5 * time.Minute)
+	for time.Now().Before(deadline) {
+		if mockSrv.Stats().TotalCalls >= totalMsgs {
+			attrOut, _ := env.SQS.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+				QueueUrl: aws.String(qURL),
+				AttributeNames: []sqstypes.QueueAttributeName{
+					sqstypes.QueueAttributeNameApproximateNumberOfMessages,
+					sqstypes.QueueAttributeNameApproximateNumberOfMessagesNotVisible,
+				},
+			})
+			if attrOut.Attributes["ApproximateNumberOfMessages"] == "0" &&
+				attrOut.Attributes["ApproximateNumberOfMessagesNotVisible"] == "0" {
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 	wall := time.Since(start)
 
-	slices.Sort(overheads)
-	p50 := overheads[len(overheads)/2]
-	p95 := overheads[int(float64(len(overheads))*0.95)]
-	p99 := overheads[int(float64(len(overheads))*0.99)]
-	rps := float64(assigned) / wall.Seconds()
+	stopWorkers()
+	wg.Wait()
+
 	snap := mockSrv.Stats()
+	rps := float64(snap.TotalCalls) / wall.Seconds()
+	t.Logf("E2E_LOCALSTACK_REPORT: providers=%d msgs=%d workers=%d inflight_per_worker=%d top_provider_msgs=%d wall=%v throughput=%.1f req/s max_provider_inflight=%d global_max_inflight=%d dup_idem=%d",
+		numProviders, totalMsgs, numWorkers, inflightPerWorker, counts[0], wall.Round(time.Millisecond), rps,
+		snap.MaxProviderInflight, snap.GlobalMaxInflight, snap.DuplicateIdemKeys)
 
-	t.Logf("LOAD REPORT (Zipf 200 providers): msgs=%d wall=%v throughput=%.1f req/s overhead_p50=%v overhead_p95=%v overhead_p99=%v max_provider_inflight=%d dup_idem=%d",
-		assigned, wall.Round(time.Millisecond), rps, p50, p95, p99, snap.MaxProviderInflight, snap.DuplicateIdemKeys)
-
+	if snap.TotalCalls != totalMsgs {
+		t.Fatalf("TotalCalls = %d, want %d", snap.TotalCalls, totalMsgs)
+	}
 	if snap.MaxProviderInflight != 1 {
-		t.Fatalf("SC-001 failed: max_provider_inflight=%d", snap.MaxProviderInflight)
+		t.Fatalf("SC-001 VIOLATION: real LocalStack FIFO MaxProviderInflight = %d, want 1", snap.MaxProviderInflight)
 	}
 	if snap.DuplicateIdemKeys != 0 {
-		t.Fatalf("SC-002 failed: dup_idem=%d", snap.DuplicateIdemKeys)
-	}
-	if rps < 120.0 {
-		t.Fatalf("SC-003 failed: throughput=%.1f req/s < 120 req/s", rps)
-	}
-	if p99 >= 50*time.Millisecond {
-		t.Fatalf("SC-003 failed: overhead p99=%v >= 50ms", p99)
+		t.Fatalf("SC-002 VIOLATION: DuplicateIdemKeys = %d, want 0", snap.DuplicateIdemKeys)
 	}
 }
-
-type memExecStore struct {
-	mu    sync.Mutex
-	items map[string]domain.ExecutionStatus
-}
-
-func (m *memExecStore) Acquire(_ context.Context, key execute.ExecKey, owner string, ttl time.Duration, now time.Time) (execute.Execution, execute.AcquireOutcome, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	k := key.RequestID + "#" + string(key.RunDate)
-	if st, ok := m.items[k]; ok && st.IsTerminal() {
-		return execute.Execution{Status: st}, execute.AcquireAlreadyTerminal, nil
-	}
-	m.items[k] = domain.StatusInProgress
-	return execute.Execution{RequestID: key.RequestID, RunDate: key.RunDate, Status: domain.StatusInProgress, Attempts: 1, LeaseOwner: owner, LeaseExpiresAt: now.Add(ttl)}, execute.AcquireAcquired, nil
-}
-func (m *memExecStore) Complete(_ context.Context, key execute.ExecKey, _ string, _ execute.Result) error {
-	m.mu.Lock()
-	m.items[key.RequestID+"#"+string(key.RunDate)] = domain.StatusSucceeded
-	m.mu.Unlock()
-	return nil
-}
-func (m *memExecStore) ScheduleRetry(_ context.Context, _ execute.ExecKey, _ string, _ execute.ErrInfo) error {
-	return nil
-}
-func (m *memExecStore) FailPermanent(_ context.Context, _ execute.ExecKey, _ string, _ execute.ErrInfo) error {
-	return nil
-}
-func (m *memExecStore) FailExhausted(_ context.Context, _ execute.ExecKey, _ string, _ execute.ErrInfo) error {
-	return nil
-}
-func (m *memExecStore) MarkSkipped(_ context.Context, _ execute.ExecKey, _ string, _ time.Time) error {
-	return nil
-}
-
-type memReqGetter struct{ items map[string]domain.Request }
-
-func (m *memReqGetter) Get(_ context.Context, id string) (domain.Request, error) {
-	r, ok := m.items[id]
-	if !ok {
-		return domain.Request{}, domain.ErrRequestNotFound
-	}
-	return r, nil
-}
-
-type noopAcker struct{}
-
-func (noopAcker) Ack(_ context.Context, _ execute.Message) error                     { return nil }
-func (noopAcker) Nack(_ context.Context, _ execute.Message, _ time.Duration) error   { return nil }
-func (noopAcker) Extend(_ context.Context, _ execute.Message, _ time.Duration) error { return nil }

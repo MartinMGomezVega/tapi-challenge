@@ -30,6 +30,20 @@ type ExecKey struct {
 	RunDate   domain.RunDate
 }
 
+// HandleOutcome tells the queue consumer whether the message completed normally or was deferred.
+type HandleOutcome int
+
+// HandleOutcome values returned by UseCase.Execute (ADR-006).
+const (
+	// OutcomeDone indicates the message reached a terminal state and the consumer may proceed
+	// to the next message in the same FIFO MessageGroupId batch.
+	OutcomeDone HandleOutcome = iota
+	// OutcomeDeferred indicates the message/provider was backed off, exhausted, breaker-opened,
+	// leased by another worker, or hit a persistence error; remaining queued messages in the
+	// same MessageGroupId batch must not be executed and must be released with Nack(0).
+	OutcomeDeferred
+)
+
 // AcquireOutcome classifies the result of attempting to acquire an execution lease.
 type AcquireOutcome int
 

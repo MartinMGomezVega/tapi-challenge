@@ -1,6 +1,6 @@
 # Checkpoint 006 — Infraestructura, CI/CD y ciclo de vida de desarrollo
 
-**Branch**: `006-infraestructura-y-delivery` (mergeada a `main` con `--no-ff`)
+**Branch**: `006-infraestructura-y-delivery` (mergeada a `main` con `--no-ff`, actualizada en `fix/review-findings`)
 **Estado**: Completada (`T001`–`T025`, cumpliendo estrictamente la Regla E: sin `terraform apply` ni credenciales reales de AWS; validado con `terraform fmt`, `terraform validate`, `terraform test` con `mock_provider`, `tflint`, `checkov` y `actionlint`).
 
 ## 1. Entregables y tareas completadas
@@ -31,7 +31,17 @@
   - `modules/messaging/tests/messaging.tftest.hcl`: **1 passed, 0 failed**
   - `stack/tests/stack.tftest.hcl`: **1 passed, 0 failed**
 - `tflint --recursive`: **0 issues**
-- `checkov -d deploy/terraform --framework terraform`: **306 passed, 0 failed** (SC-003 ✅)
+- **Checkov**: **306 passed / 0 failed / 6 skipped únicos** (12 evaluaciones totales al escanear `modules/` + `stack/`, todos con anotación `# checkov:skip=` justificada en código):
+
+| Check ID | Recurso | Justificación |
+|---|---|---|
+| `CKV_AWS_144` | `modules/data/main.tf` (`aws_s3_bucket.results`) | Replicación cross-region fuera de alcance por restricción C2 (despliegue single-region en la misma región que la API interna). |
+| `CKV_AWS_18` | `modules/data/main.tf` (`aws_s3_bucket.results`) | S3 server access logging diferido al bucket centralizado de auditoría organizacional (no se crea un segundo bucket en el baseline de servicio). |
+| `CKV2_AWS_62` | `modules/data/main.tf` (`aws_s3_bucket.results`) | S3 Event Notifications no requeridas: los blobs > 350 KB y los reportes diarios se consultan bajo demanda/Athena. |
+| `CKV_AWS_109` | `modules/security/main.tf` (`aws_iam_policy_document.kms_policy`) | Las Key Policies de AWS KMS exigen `Resource = "*"` (que se restringe automáticamente a esa única clave KMS) para habilitar administración por cuenta root. |
+| `CKV_AWS_111` | `modules/security/main.tf` (`aws_iam_policy_document.kms_policy`) | Misma semántica obligatoria de AWS KMS Key Policy (`Resource = "*"` = sólo esta CMK); acceso de servicios AWS adicionalmente acotado por `aws:SourceAccount`. |
+| `CKV_AWS_356` | `modules/security/main.tf` (`aws_iam_policy_document.kms_policy`) | Misma semántica obligatoria de AWS KMS Key Policy (`Resource = "*"` = sólo esta CMK). |
+
 - `make up && make demo && make down`: **PASS** (`max_provider_inflight=1`, `duplicate_idem_keys=0`)
 - Go gates (`make test`, `make cover` ≥ 90 %, `gofmt`, `go vet`, `golangci-lint`, `staticcheck`, `govulncheck`): **PASS / 0 issues / 0 vulnerabilidades**.
 
@@ -40,9 +50,9 @@
 |---|---|---|---|
 | SC-001 | `make up && make demo` en máquina limpia con Docker en < 5 min | Ejecutado en vivo contra LocalStack en ~1 min: 100 % ejecutado, `max_provider_inflight=1`, `duplicate_idem_keys=0` | ✅ |
 | SC-002 | Pipeline de PR < 10 min | `ci.yml` paralelizado en 4 jobs independientes (`go-quality-and-tests`, `integration-localstack`, `docker-and-trivy`, `terraform-validate-and-security`) validado con `actionlint` | ✅ |
-| SC-003 | `checkov` sin hallazgos HIGH; Trivy sin CVEs CRITICAL | Checkov: **306 passed, 0 failed**; imágenes base `distroless/static-debian12:nonroot` + `govulncheck` **0 vulnerabilidades** | ✅ |
+| SC-003 | `checkov` sin hallazgos HIGH; Trivy sin CVEs CRITICAL | Checkov: **306 passed / 0 failed / 6 skipped (justificados)**; imágenes base `distroless/static-debian12:nonroot` + `govulncheck` **0 vulnerabilidades** | ✅ |
 | SC-004 | De cero a `dev` con 1 `terraform apply` + 1 pipeline | `envs/dev` + `stack` + `cd.yml` validados con `terraform validate` y `terraform test` (sin `apply` real por Regla E) | ✅ (estático/mock) |
 
 ## 4. Desvíos y tests modificados (Regla B)
-- **Regla E**: `T013`, `T018` y `T021` (que mencionan `apply` en `dev` o AWS IAM Access Analyzer en vivo) se validaron mediante `terraform validate`, `terraform test` con mocks, `tflint` y Checkov (`306/306 PASS`), sin credenciales ni cambios externos en AWS.
+- **Regla E**: `T013`, `T018` y `T021` (que mencionan `apply` en `dev` o AWS IAM Access Analyzer en vivo) se validaron mediante `terraform validate`, `terraform test` con mocks, `tflint` y Checkov (`306 passed / 0 failed / 6 skipped justificados`), sin credenciales ni cambios externos en AWS.
 - **Tests existentes modificados (Regla B)**: Ninguno.

@@ -21,8 +21,10 @@ jobs:
           cache: true
       - name: Full unit + 1M property tests (-race)
         run: make test-full
-      - name: Zipf 200-provider load benchmark (SC-001..SC-003)
-        run: go test -tags=integration -race -v -run TestWorker_LoadBenchmark_Zipf200Providers ./internal/app/execute/...
+      - name: Real LocalStack E2E throughput & exclusivity test (50 Zipf providers, 2k msgs)
+        run: go test -tags=integration -race -v -run TestWorker_LocalStack_EndToEndThroughput ./internal/app/execute/...
+      - name: ExecuteRequest pure overhead benchmark
+        run: go test -bench=BenchmarkExecuteUseCase_Overhead -benchmem -run='^$' ./internal/app/execute/...
       - name: Security vulnerability scan (govulncheck)
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest

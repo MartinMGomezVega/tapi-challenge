@@ -241,7 +241,7 @@ func TestExecute_SuccessInlineResult(t *testing.T) {
 	acker := &fakeAcker{events: &store.events}
 
 	uc := execute.New(store, reqs, api, blobs, acker, nil, clk, discardLogger(), execute.Config{OwnerID: "worker-1"})
-	if err := uc.Execute(context.Background(), sampleMsg()); err != nil {
+	if _, err := uc.Execute(context.Background(), sampleMsg()); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
@@ -278,7 +278,7 @@ func TestExecute_NotFoundAndDisabled(t *testing.T) {
 		acker := &fakeAcker{}
 
 		uc := execute.New(store, reqs, api, &fakeBlobStore{}, acker, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"})
-		if err := uc.Execute(context.Background(), sampleMsg()); err != nil {
+		if _, err := uc.Execute(context.Background(), sampleMsg()); err != nil {
 			t.Fatalf("Execute() error = %v", err)
 		}
 		if api.calls != 0 {
@@ -303,7 +303,7 @@ func TestExecute_NotFoundAndDisabled(t *testing.T) {
 		acker := &fakeAcker{}
 
 		uc := execute.New(store, reqs, api, &fakeBlobStore{}, acker, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"})
-		if err := uc.Execute(context.Background(), sampleMsg()); err != nil {
+		if _, err := uc.Execute(context.Background(), sampleMsg()); err != nil {
 			t.Fatalf("Execute() error = %v", err)
 		}
 		if api.calls != 0 {
@@ -331,7 +331,7 @@ func TestExecute_OversizedResponseToS3BeforeComplete(t *testing.T) {
 	acker := &fakeAcker{events: &store.events}
 
 	uc := execute.New(store, reqs, api, blobs, acker, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"})
-	if err := uc.Execute(context.Background(), sampleMsg()); err != nil {
+	if _, err := uc.Execute(context.Background(), sampleMsg()); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
@@ -367,7 +367,7 @@ func TestExecute_LeasedByOtherExtendsVisibilityWithoutCall(t *testing.T) {
 	acker := &fakeAcker{}
 
 	uc := execute.New(store, &fakeReqGetter{req: sampleReq()}, api, &fakeBlobStore{}, acker, nil, clk, discardLogger(), execute.Config{OwnerID: "worker-1"})
-	if err := uc.Execute(context.Background(), sampleMsg()); err != nil {
+	if _, err := uc.Execute(context.Background(), sampleMsg()); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
 	if api.calls != 0 {
@@ -402,7 +402,7 @@ func TestExecute_AlreadyTerminalAcksWithoutCall(t *testing.T) {
 			acker := &fakeAcker{}
 
 			uc := execute.New(store, &fakeReqGetter{req: sampleReq()}, api, &fakeBlobStore{}, acker, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"})
-			if err := uc.Execute(context.Background(), sampleMsg()); err != nil {
+			if _, err := uc.Execute(context.Background(), sampleMsg()); err != nil {
 				t.Fatalf("Execute() error = %v", err)
 			}
 			if api.calls != 0 {
@@ -522,7 +522,7 @@ func TestExecute_RetryPermanentExhaustedAndInProcess(t *testing.T) {
 
 		uc := execute.New(store, &fakeReqGetter{req: sampleReq()}, api, &fakeBlobStore{}, acker, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"}).
 			WithBreaker(brk).WithMetrics(met)
-		if err := uc.Execute(context.Background(), sampleMsg()); err != nil {
+		if _, err := uc.Execute(context.Background(), sampleMsg()); err != nil {
 			t.Fatalf("Execute: %v", err)
 		}
 		if store.scheduleCalls != 1 || acker.nacks != 1 || acker.lastDelay != 30*time.Second {
@@ -543,7 +543,7 @@ func TestExecute_RetryPermanentExhaustedAndInProcess(t *testing.T) {
 
 		uc := execute.New(store, &fakeReqGetter{req: sampleReq()}, api, &fakeBlobStore{}, acker, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"}).
 			WithMetrics(met)
-		if err := uc.Execute(context.Background(), sampleMsg()); err != nil {
+		if _, err := uc.Execute(context.Background(), sampleMsg()); err != nil {
 			t.Fatalf("Execute: %v", err)
 		}
 		if store.failPermCalls != 1 || acker.acks != 1 {
@@ -561,7 +561,7 @@ func TestExecute_RetryPermanentExhaustedAndInProcess(t *testing.T) {
 		msg := sampleMsg()
 		msg.ReceiveCount = 6
 		uc := execute.New(store, &fakeReqGetter{req: sampleReq()}, api, &fakeBlobStore{}, acker, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"})
-		if err := uc.Execute(context.Background(), msg); err != nil {
+		if _, err := uc.Execute(context.Background(), msg); err != nil {
 			t.Fatalf("Execute: %v", err)
 		}
 		if store.failExhCalls != 1 || acker.nacks != 1 || acker.lastDelay != 0 {
@@ -596,7 +596,7 @@ func TestExecute_RetryPermanentExhaustedAndInProcess(t *testing.T) {
 
 		uc := execute.New(store, &fakeReqGetter{req: sampleReq()}, api, &fakeBlobStore{}, acker, pol, clk, discardLogger(), execute.Config{OwnerID: "w1"}).
 			WithBreaker(brk).WithMetrics(met).WithLimiter(execute.NewProviderRateLimiter(1000, 10))
-		if err := uc.Execute(context.Background(), sampleMsg()); err != nil {
+		if _, err := uc.Execute(context.Background(), sampleMsg()); err != nil {
 			t.Fatalf("Execute: %v", err)
 		}
 		if api.calls != 2 || store.completeCalls != 1 || acker.acks != 1 {
@@ -615,7 +615,7 @@ func TestExecute_RetryPermanentExhaustedAndInProcess(t *testing.T) {
 
 		uc := execute.New(store, &fakeReqGetter{req: sampleReq()}, api, &fakeBlobStore{}, acker, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"}).
 			WithBreaker(brk).WithMetrics(met)
-		if err := uc.Execute(context.Background(), sampleMsg()); err != nil {
+		if _, err := uc.Execute(context.Background(), sampleMsg()); err != nil {
 			t.Fatalf("Execute: %v", err)
 		}
 		if api.calls != 0 || len(store.events) != 0 || acker.nacks != 1 || acker.lastDelay != 60*time.Second {
@@ -633,7 +633,7 @@ func TestExecute_PersistenceAndLeaseLostErrors(t *testing.T) {
 		store := &fakeExecStore{acquireErr: errors.New("ddb throttle")}
 		acker := &fakeAcker{}
 		uc := execute.New(store, &fakeReqGetter{req: sampleReq()}, &fakeProviderAPI{}, &fakeBlobStore{}, acker, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"})
-		if err := uc.Execute(context.Background(), sampleMsg()); err == nil {
+		if _, err := uc.Execute(context.Background(), sampleMsg()); err == nil {
 			t.Fatalf("expected error on acquire failure")
 		}
 		if acker.nacks != 1 {
@@ -647,7 +647,7 @@ func TestExecute_PersistenceAndLeaseLostErrors(t *testing.T) {
 		store := &fakeExecStore{outcome: execute.AcquireAcquired}
 		acker := &fakeAcker{}
 		uc := execute.New(store, &fakeReqGetter{err: errors.New("ddb timeout")}, &fakeProviderAPI{}, &fakeBlobStore{}, acker, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"})
-		if err := uc.Execute(context.Background(), sampleMsg()); err == nil {
+		if _, err := uc.Execute(context.Background(), sampleMsg()); err == nil {
 			t.Fatalf("expected error on get failure")
 		}
 		if acker.nacks != 1 {
@@ -665,7 +665,7 @@ func TestExecute_PersistenceAndLeaseLostErrors(t *testing.T) {
 		acker := &fakeAcker{}
 
 		uc := execute.New(store, &fakeReqGetter{req: sampleReq()}, api, blobs, acker, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"})
-		if err := uc.Execute(context.Background(), sampleMsg()); err == nil {
+		if _, err := uc.Execute(context.Background(), sampleMsg()); err == nil {
 			t.Fatalf("expected error on s3 put failure")
 		}
 		if store.completeCalls != 0 || acker.acks != 0 || acker.nacks != 1 {
@@ -681,7 +681,7 @@ func TestExecute_PersistenceAndLeaseLostErrors(t *testing.T) {
 		acker := &fakeAcker{}
 
 		uc := execute.New(store, &fakeReqGetter{req: sampleReq()}, api, &fakeBlobStore{}, acker, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"})
-		if err := uc.Execute(context.Background(), sampleMsg()); err != nil {
+		if _, err := uc.Execute(context.Background(), sampleMsg()); err != nil {
 			t.Fatalf("Execute: %v", err)
 		}
 		if acker.acks != 0 || acker.nacks != 0 {
@@ -697,7 +697,7 @@ func TestExecute_PersistenceAndLeaseLostErrors(t *testing.T) {
 		acker := &fakeAcker{}
 
 		uc := execute.New(store, &fakeReqGetter{req: sampleReq()}, api, &fakeBlobStore{}, acker, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"})
-		if err := uc.Execute(context.Background(), sampleMsg()); err == nil {
+		if _, err := uc.Execute(context.Background(), sampleMsg()); err == nil {
 			t.Fatalf("expected error on Complete failure")
 		}
 		if acker.nacks != 1 {
@@ -713,7 +713,7 @@ func TestExecute_PersistenceAndLeaseLostErrors(t *testing.T) {
 		store := &fakeExecStore{outcome: execute.AcquireAcquired}
 		acker := &fakeAcker{}
 		uc := execute.New(store, &fakeReqGetter{req: sampleReq()}, &fakeProviderAPI{err: errors.New("conn reset")}, &fakeBlobStore{}, acker, nil, clk, nil, execute.Config{OwnerID: "w1"})
-		if err := uc.Execute(context.Background(), sampleMsg()); err != nil {
+		if _, err := uc.Execute(context.Background(), sampleMsg()); err != nil {
 			t.Fatalf("transport retry: %v", err)
 		}
 		if store.scheduleCalls != 1 || acker.nacks != 1 {
@@ -723,24 +723,24 @@ func TestExecute_PersistenceAndLeaseLostErrors(t *testing.T) {
 		// ScheduleRetry ErrLeaseLost returns nil; other error returns err.
 		storeLost := &fakeExecStore{outcome: execute.AcquireAcquired, scheduleErr: execute.ErrLeaseLost}
 		ucLost := execute.New(storeLost, &fakeReqGetter{req: sampleReq()}, &fakeProviderAPI{resp: execute.Response{StatusCode: 503}}, &fakeBlobStore{}, &fakeAcker{}, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"})
-		if err := ucLost.Execute(context.Background(), sampleMsg()); err != nil {
+		if _, err := ucLost.Execute(context.Background(), sampleMsg()); err != nil {
 			t.Fatalf("schedule lease lost: %v", err)
 		}
 		storeErr := &fakeExecStore{outcome: execute.AcquireAcquired, scheduleErr: errors.New("ddb err")}
 		ucErr := execute.New(storeErr, &fakeReqGetter{req: sampleReq()}, &fakeProviderAPI{resp: execute.Response{StatusCode: 503}}, &fakeBlobStore{}, &fakeAcker{}, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"})
-		if err := ucErr.Execute(context.Background(), sampleMsg()); err == nil {
+		if _, err := ucErr.Execute(context.Background(), sampleMsg()); err == nil {
 			t.Fatalf("expected schedule error")
 		}
 
 		// FailPermanent ErrLeaseLost & transient error.
 		storePermLost := &fakeExecStore{outcome: execute.AcquireAcquired, failPermErr: execute.ErrLeaseLost}
 		ucPermLost := execute.New(storePermLost, &fakeReqGetter{req: sampleReq()}, &fakeProviderAPI{resp: execute.Response{StatusCode: 400}}, &fakeBlobStore{}, &fakeAcker{}, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"})
-		if err := ucPermLost.Execute(context.Background(), sampleMsg()); err != nil {
+		if _, err := ucPermLost.Execute(context.Background(), sampleMsg()); err != nil {
 			t.Fatalf("failPerm lease lost: %v", err)
 		}
 		storePermErr := &fakeExecStore{outcome: execute.AcquireAcquired, failPermErr: errors.New("ddb err")}
 		ucPermErr := execute.New(storePermErr, &fakeReqGetter{req: sampleReq()}, &fakeProviderAPI{resp: execute.Response{StatusCode: 400}}, &fakeBlobStore{}, &fakeAcker{}, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"})
-		if err := ucPermErr.Execute(context.Background(), sampleMsg()); err == nil {
+		if _, err := ucPermErr.Execute(context.Background(), sampleMsg()); err == nil {
 			t.Fatalf("expected failPerm error")
 		}
 
@@ -749,29 +749,29 @@ func TestExecute_PersistenceAndLeaseLostErrors(t *testing.T) {
 		msgExh.ReceiveCount = 6
 		storeExhLost := &fakeExecStore{outcome: execute.AcquireAcquired, failExhErr: execute.ErrLeaseLost}
 		ucExhLost := execute.New(storeExhLost, &fakeReqGetter{req: sampleReq()}, &fakeProviderAPI{resp: execute.Response{StatusCode: 503}}, &fakeBlobStore{}, &fakeAcker{}, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"})
-		if err := ucExhLost.Execute(context.Background(), msgExh); err != nil {
+		if _, err := ucExhLost.Execute(context.Background(), msgExh); err != nil {
 			t.Fatalf("failExh lease lost: %v", err)
 		}
 		storeExhErr := &fakeExecStore{outcome: execute.AcquireAcquired, failExhErr: errors.New("ddb err")}
 		ucExhErr := execute.New(storeExhErr, &fakeReqGetter{req: sampleReq()}, &fakeProviderAPI{resp: execute.Response{StatusCode: 503}}, &fakeBlobStore{}, &fakeAcker{}, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"})
-		if err := ucExhErr.Execute(context.Background(), msgExh); err == nil {
+		if _, err := ucExhErr.Execute(context.Background(), msgExh); err == nil {
 			t.Fatalf("expected failExh error")
 		}
 
 		// NotFound / Disabled store error & oversized response with nil BlobStore.
 		ucNF := execute.New(&fakeExecStore{outcome: execute.AcquireAcquired, failPermErr: errors.New("ddb")}, &fakeReqGetter{err: domain.ErrRequestNotFound}, &fakeProviderAPI{}, nil, &fakeAcker{}, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"})
-		if err := ucNF.Execute(context.Background(), sampleMsg()); err == nil {
+		if _, err := ucNF.Execute(context.Background(), sampleMsg()); err == nil {
 			t.Fatalf("expected not-found persist error")
 		}
 		disReq := sampleReq()
 		disReq.Enabled = false
 		ucSkip := execute.New(&fakeExecStore{outcome: execute.AcquireAcquired, skipErr: errors.New("ddb")}, &fakeReqGetter{req: disReq}, &fakeProviderAPI{}, nil, &fakeAcker{}, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"})
-		if err := ucSkip.Execute(context.Background(), sampleMsg()); err == nil {
+		if _, err := ucSkip.Execute(context.Background(), sampleMsg()); err == nil {
 			t.Fatalf("expected skip persist error")
 		}
 		big := bytes.Repeat([]byte("z"), domain.MaxInlineResponseBytes+1)
 		ucNoBlob := execute.New(&fakeExecStore{outcome: execute.AcquireAcquired}, &fakeReqGetter{req: sampleReq()}, &fakeProviderAPI{resp: execute.Response{StatusCode: 200, Body: big}}, nil, &fakeAcker{}, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"})
-		if err := ucNoBlob.Execute(context.Background(), sampleMsg()); err == nil {
+		if _, err := ucNoBlob.Execute(context.Background(), sampleMsg()); err == nil {
 			t.Fatalf("expected error when BlobStore is nil for oversized response")
 		}
 
@@ -781,11 +781,101 @@ func TestExecute_PersistenceAndLeaseLostErrors(t *testing.T) {
 		}}
 		storeFallback := &fakeExecStore{outcome: execute.AcquireAcquired}
 		ucFB := execute.New(storeFallback, &fakeReqGetter{req: sampleReq()}, &fakeProviderAPI{resp: execute.Response{StatusCode: 503}}, &fakeBlobStore{}, &fakeAcker{}, alwaysInProc, clk, discardLogger(), execute.Config{OwnerID: "w1"})
-		if err := ucFB.Execute(context.Background(), sampleMsg()); err != nil {
+		if _, err := ucFB.Execute(context.Background(), sampleMsg()); err != nil {
 			t.Fatalf("in-process fallback: %v", err)
 		}
 		if storeFallback.scheduleCalls != 1 {
 			t.Fatalf("expected ScheduleRetry after max in-process attempts")
 		}
 	})
+}
+
+// Review Finding 2: Execute returns OutcomeDone for terminal completion and OutcomeDeferred for backoff/exhausted/breaker/leased/errors.
+func TestExecute_HandleOutcome_DoneVsDeferred(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)
+	clk := clock.NewFake(now)
+
+	cases := []struct {
+		name        string
+		setup       func() (*execute.UseCase, execute.Message)
+		wantOutcome execute.HandleOutcome
+		wantErr     bool
+	}{
+		{
+			name: "200 SUCCEEDED -> OutcomeDone",
+			setup: func() (*execute.UseCase, execute.Message) {
+				uc := execute.New(&fakeExecStore{outcome: execute.AcquireAcquired}, &fakeReqGetter{req: sampleReq()},
+					&fakeProviderAPI{resp: execute.Response{StatusCode: 200, Body: []byte(`{}`)}}, &fakeBlobStore{}, &fakeAcker{}, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"})
+				return uc, sampleMsg()
+			},
+			wantOutcome: execute.OutcomeDone,
+		},
+		{
+			name: "400 FAILED_PERMANENT -> OutcomeDone",
+			setup: func() (*execute.UseCase, execute.Message) {
+				uc := execute.New(&fakeExecStore{outcome: execute.AcquireAcquired}, &fakeReqGetter{req: sampleReq()},
+					&fakeProviderAPI{resp: execute.Response{StatusCode: 400}}, &fakeBlobStore{}, &fakeAcker{}, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"})
+				return uc, sampleMsg()
+			},
+			wantOutcome: execute.OutcomeDone,
+		},
+		{
+			name: "503 RetryLater -> OutcomeDeferred",
+			setup: func() (*execute.UseCase, execute.Message) {
+				uc := execute.New(&fakeExecStore{outcome: execute.AcquireAcquired}, &fakeReqGetter{req: sampleReq()},
+					&fakeProviderAPI{resp: execute.Response{StatusCode: 503}}, &fakeBlobStore{}, &fakeAcker{}, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"})
+				return uc, sampleMsg()
+			},
+			wantOutcome: execute.OutcomeDeferred,
+		},
+		{
+			name: "503 receiveCount=6 FailExhausted -> OutcomeDeferred",
+			setup: func() (*execute.UseCase, execute.Message) {
+				uc := execute.New(&fakeExecStore{outcome: execute.AcquireAcquired}, &fakeReqGetter{req: sampleReq()},
+					&fakeProviderAPI{resp: execute.Response{StatusCode: 503}}, &fakeBlobStore{}, &fakeAcker{}, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"})
+				msg := sampleMsg()
+				msg.ReceiveCount = 6
+				return uc, msg
+			},
+			wantOutcome: execute.OutcomeDeferred,
+		},
+		{
+			name: "open circuit breaker -> OutcomeDeferred",
+			setup: func() (*execute.UseCase, execute.Message) {
+				uc := execute.New(&fakeExecStore{outcome: execute.AcquireAcquired}, &fakeReqGetter{req: sampleReq()},
+					&fakeProviderAPI{}, &fakeBlobStore{}, &fakeAcker{}, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"}).
+					WithBreaker(&fakeBreaker{allow: false, cooldown: 60 * time.Second})
+				return uc, sampleMsg()
+			},
+			wantOutcome: execute.OutcomeDeferred,
+		},
+		{
+			name: "AcquireLeasedByOther -> OutcomeDeferred",
+			setup: func() (*execute.UseCase, execute.Message) {
+				uc := execute.New(&fakeExecStore{outcome: execute.AcquireLeasedByOther, exec: execute.Execution{LeaseExpiresAt: now.Add(30 * time.Second)}},
+					&fakeReqGetter{req: sampleReq()}, &fakeProviderAPI{}, &fakeBlobStore{}, &fakeAcker{}, nil, clk, discardLogger(), execute.Config{OwnerID: "w1"})
+				return uc, sampleMsg()
+			},
+			wantOutcome: execute.OutcomeDeferred,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			uc, msg := tc.setup()
+			got, err := uc.Execute(context.Background(), msg)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.wantOutcome {
+				t.Fatalf("outcome = %v, want %v", got, tc.wantOutcome)
+			}
+		})
+	}
 }
