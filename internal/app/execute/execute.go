@@ -105,11 +105,10 @@ func (u *UseCase) WithMetrics(m MetricsRecorder) *UseCase {
 }
 
 // Execute processes a single SQS FIFO message end-to-end (003 US1-US3, 004, ADR-006).
+// Returns OutcomeDone when the message reached a terminal state and the consumer may proceed
+// to the next message in the same MessageGroupId batch, or OutcomeDeferred when the provider
+// is backed off, exhausted, breaker-opened, leased by another worker, or hit a transient error.
 func (u *UseCase) Execute(ctx context.Context, msg Message) (HandleOutcome, error) {
-	return OutcomeDone, u.executeLegacy(ctx, msg)
-}
-
-func (u *UseCase) executeLegacy(ctx context.Context, msg Message) error {
 	now := u.clock.Now().UTC()
 	key := ExecKey{RequestID: msg.RequestID, RunDate: msg.RunDate}
 	log := u.logger.With(
@@ -126,7 +125,7 @@ func (u *UseCase) executeLegacy(ctx context.Context, msg Message) error {
 				u.metrics.RecordBreakerOpen(msg.Provider, true)
 			}
 			log.Warn("provider circuit breaker open, deferring message", "cooldown_ms", cooldown.Milliseconds())
-			return u.acker.Nack(ctx, msg, cooldown)
+			return OutcomeDeferred, u.acker.Nack(ctx, msg, cooldown)
 		}
 	}
 
@@ -134,17 +133,17 @@ func (u *UseCase) executeLegacy(ctx context.Context, msg Message) error {
 	if err != nil {
 		log.Error("failed to acquire execution lease", "error", err)
 		_ = u.acker.Nack(ctx, msg, defaultPersistenceRetryDelay)
-		return fmt.Errorf("acquire %s#%s: %w", msg.RequestID, msg.RunDate, err)
+		return OutcomeDeferred, fmt.Errorf("acquire %s#%s: %w", msg.RequestID, msg.RunDate, err)
 	}
 
 	switch outcome {
 	case AcquireAlreadyTerminal:
 		log.Info("execution already terminal, acking duplicate", "status", string(execRec.Status))
-		return u.acker.Ack(ctx, msg)
+		return OutcomeDone, u.acker.Ack(ctx, msg)
 	case AcquireLeasedByOther:
 		rem := max(execRec.LeaseExpiresAt.Sub(now), DefaultMinExtend)
 		log.Info("execution leased by another worker, extending visibility", "extend_ms", rem.Milliseconds())
-		return u.acker.Extend(ctx, msg, rem)
+		return OutcomeDeferred, u.acker.Extend(ctx, msg, rem)
 	case AcquireAcquired:
 		// proceed
 	}
@@ -159,31 +158,31 @@ func (u *UseCase) executeLegacy(ctx context.Context, msg Message) error {
 			}
 			if failErr := u.store.FailPermanent(ctx, key, u.cfg.OwnerID, info); failErr != nil && !errors.Is(failErr, ErrLeaseLost) {
 				_ = u.acker.Nack(ctx, msg, defaultPersistenceRetryDelay)
-				return fmt.Errorf("fail permanent not found %s: %w", msg.RequestID, failErr)
+				return OutcomeDeferred, fmt.Errorf("fail permanent not found %s: %w", msg.RequestID, failErr)
 			}
 			u.recordMetric(msg.Provider, domain.StatusFailedPermanent, ReasonNotFound, 0)
 			log.Warn("request not found in catalog, marked FAILED_PERMANENT")
-			return u.acker.Ack(ctx, msg)
+			return OutcomeDone, u.acker.Ack(ctx, msg)
 		}
 		log.Error("failed to load request from catalog", "error", err)
 		_ = u.acker.Nack(ctx, msg, defaultPersistenceRetryDelay)
-		return fmt.Errorf("get request %s: %w", msg.RequestID, err)
+		return OutcomeDeferred, fmt.Errorf("get request %s: %w", msg.RequestID, err)
 	}
 
 	if !req.Enabled {
 		if skipErr := u.store.MarkSkipped(ctx, key, u.cfg.OwnerID, u.clock.Now().UTC()); skipErr != nil && !errors.Is(skipErr, ErrLeaseLost) {
 			_ = u.acker.Nack(ctx, msg, defaultPersistenceRetryDelay)
-			return fmt.Errorf("mark skipped %s: %w", msg.RequestID, skipErr)
+			return OutcomeDeferred, fmt.Errorf("mark skipped %s: %w", msg.RequestID, skipErr)
 		}
 		u.recordMetric(msg.Provider, domain.StatusSkipped, "", 0)
 		log.Info("request disabled after dispatch, marked SKIPPED")
-		return u.acker.Ack(ctx, msg)
+		return OutcomeDone, u.acker.Ack(ctx, msg)
 	}
 
 	if u.limiter != nil {
 		if err := u.limiter.Wait(ctx, msg.Provider); err != nil {
 			_ = u.acker.Nack(ctx, msg, 0)
-			return err
+			return OutcomeDeferred, err
 		}
 	}
 
@@ -225,7 +224,7 @@ func (u *UseCase) executeLegacy(ctx context.Context, msg Message) error {
 			case <-ctx.Done():
 				timer.Stop()
 				_ = u.acker.Nack(ctx, msg, 0)
-				return ctx.Err()
+				return OutcomeDeferred, ctx.Err()
 			case <-timer.C:
 			}
 		}
@@ -254,13 +253,13 @@ func (u *UseCase) executeLegacy(ctx context.Context, msg Message) error {
 		if len(resp.Body) > u.cfg.MaxInline {
 			if u.blobs == nil {
 				_ = u.acker.Nack(ctx, msg, defaultPersistenceRetryDelay)
-				return fmt.Errorf("response exceeds %d bytes and no BlobStore configured", u.cfg.MaxInline)
+				return OutcomeDeferred, fmt.Errorf("response exceeds %d bytes and no BlobStore configured", u.cfg.MaxInline)
 			}
 			blobKey := domain.ResultBlobKey(msg.RunDate, msg.Provider, msg.RequestID)
 			if err := u.blobs.Put(ctx, blobKey, resp.Body); err != nil {
 				log.Error("failed to store oversized response in S3", "s3_key", blobKey, "error", err)
 				_ = u.acker.Nack(ctx, msg, defaultPersistenceRetryDelay)
-				return fmt.Errorf("put blob %s: %w", blobKey, err)
+				return OutcomeDeferred, fmt.Errorf("put blob %s: %w", blobKey, err)
 			}
 			res.ResponseS3Key = blobKey
 		} else {
@@ -269,15 +268,15 @@ func (u *UseCase) executeLegacy(ctx context.Context, msg Message) error {
 		if err := u.store.Complete(ctx, key, u.cfg.OwnerID, res); err != nil {
 			if errors.Is(err, ErrLeaseLost) {
 				log.Warn("lease lost before Complete, skipping ack")
-				return nil
+				return OutcomeDeferred, nil
 			}
 			log.Error("failed to persist SUCCEEDED execution", "error", err)
 			_ = u.acker.Nack(ctx, msg, defaultPersistenceRetryDelay)
-			return fmt.Errorf("complete %s: %w", msg.RequestID, err)
+			return OutcomeDeferred, fmt.Errorf("complete %s: %w", msg.RequestID, err)
 		}
 		u.recordMetric(msg.Provider, domain.StatusSucceeded, "", latency)
 		log.Info("execution succeeded", "http_status", resp.StatusCode, "latency_ms", res.LatencyMs, "s3_key", res.ResponseS3Key)
-		return u.acker.Ack(ctx, msg)
+		return OutcomeDone, u.acker.Ack(ctx, msg)
 
 	case ActionFailPermanent:
 		info := ErrInfo{
@@ -289,14 +288,14 @@ func (u *UseCase) executeLegacy(ctx context.Context, msg Message) error {
 		}
 		if err := u.store.FailPermanent(ctx, key, u.cfg.OwnerID, info); err != nil {
 			if errors.Is(err, ErrLeaseLost) {
-				return nil
+				return OutcomeDeferred, nil
 			}
 			_ = u.acker.Nack(ctx, msg, defaultPersistenceRetryDelay)
-			return fmt.Errorf("fail permanent %s: %w", msg.RequestID, err)
+			return OutcomeDeferred, fmt.Errorf("fail permanent %s: %w", msg.RequestID, err)
 		}
 		u.recordMetric(msg.Provider, domain.StatusFailedPermanent, info.ErrorClass, latency)
 		log.Warn("execution failed permanently", "error_class", info.ErrorClass, "http_status", resp.StatusCode, "latency_ms", info.LatencyMs)
-		return u.acker.Ack(ctx, msg)
+		return OutcomeDone, u.acker.Ack(ctx, msg)
 
 	case ActionFailExhausted:
 		info := ErrInfo{
@@ -308,15 +307,15 @@ func (u *UseCase) executeLegacy(ctx context.Context, msg Message) error {
 		}
 		if err := u.store.FailExhausted(ctx, key, u.cfg.OwnerID, info); err != nil {
 			if errors.Is(err, ErrLeaseLost) {
-				return nil
+				return OutcomeDeferred, nil
 			}
 			_ = u.acker.Nack(ctx, msg, defaultPersistenceRetryDelay)
-			return fmt.Errorf("fail exhausted %s: %w", msg.RequestID, err)
+			return OutcomeDeferred, fmt.Errorf("fail exhausted %s: %w", msg.RequestID, err)
 		}
 		u.recordMetric(msg.Provider, domain.StatusFailedExhausted, info.ErrorClass, latency)
 		log.Error("execution retries exhausted, routing to DLQ", "error_class", info.ErrorClass, "http_status", resp.StatusCode, "receive_count", receiveCount)
 		// Do not delete so SQS RedrivePolicy moves the message to the DLQ.
-		return u.acker.Nack(ctx, msg, 0)
+		return OutcomeDeferred, u.acker.Nack(ctx, msg, 0)
 
 	default: // ActionRetryLater
 		backoff := decision.Backoff
@@ -332,14 +331,14 @@ func (u *UseCase) executeLegacy(ctx context.Context, msg Message) error {
 		}
 		if err := u.store.ScheduleRetry(ctx, key, u.cfg.OwnerID, info); err != nil {
 			if errors.Is(err, ErrLeaseLost) {
-				return nil
+				return OutcomeDeferred, nil
 			}
 			_ = u.acker.Nack(ctx, msg, defaultPersistenceRetryDelay)
-			return fmt.Errorf("schedule retry %s: %w", msg.RequestID, err)
+			return OutcomeDeferred, fmt.Errorf("schedule retry %s: %w", msg.RequestID, err)
 		}
 		u.recordMetric(msg.Provider, domain.StatusRetrying, info.ErrorClass, latency)
 		log.Warn("execution scheduled for retry", "error_class", info.ErrorClass, "http_status", resp.StatusCode, "backoff_ms", backoff.Milliseconds())
-		return u.acker.Nack(ctx, msg, backoff)
+		return OutcomeDeferred, u.acker.Nack(ctx, msg, backoff)
 	}
 }
 
