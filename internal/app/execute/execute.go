@@ -104,8 +104,12 @@ func (u *UseCase) WithMetrics(m MetricsRecorder) *UseCase {
 	return u
 }
 
-// Execute processes a single SQS FIFO message end-to-end (003 US1-US3, 004).
-func (u *UseCase) Execute(ctx context.Context, msg Message) error {
+// Execute processes a single SQS FIFO message end-to-end (003 US1-US3, 004, ADR-006).
+func (u *UseCase) Execute(ctx context.Context, msg Message) (HandleOutcome, error) {
+	return OutcomeDone, u.executeLegacy(ctx, msg)
+}
+
+func (u *UseCase) executeLegacy(ctx context.Context, msg Message) error {
 	now := u.clock.Now().UTC()
 	key := ExecKey{RequestID: msg.RequestID, RunDate: msg.RunDate}
 	log := u.logger.With(

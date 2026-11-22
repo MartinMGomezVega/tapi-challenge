@@ -429,7 +429,7 @@ func TestWorker_LoadBenchmark_Zipf200Providers(t *testing.T) {
 			for _, m := range msgs {
 				sem <- struct{}{}
 				t0 := time.Now()
-				err := uc.Execute(context.Background(), m)
+				_, err := uc.Execute(context.Background(), m)
 				elapsed := time.Since(t0)
 				<-sem
 				if err != nil {

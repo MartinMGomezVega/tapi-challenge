@@ -35,7 +35,7 @@ func TestExecute_DomainRetryPolicy_And_RealBreaker(t *testing.T) {
 		api := &fakeProviderAPI{resp: execute.Response{StatusCode: 409, Body: []byte(`{"status":"duplicate"}`)}}
 		acker := &fakeAcker{}
 		uc := execute.New(store, &fakeReqGetter{req: sampleReq()}, api, &fakeBlobStore{}, acker, domPol, clk, discardLogger(), execute.Config{OwnerID: "w1"})
-		if err := uc.Execute(context.Background(), sampleMsg()); err != nil {
+		if _, err := uc.Execute(context.Background(), sampleMsg()); err != nil {
 			t.Fatalf("Execute 409: %v", err)
 		}
 		if store.completeCalls != 1 || acker.acks != 1 {
@@ -49,7 +49,7 @@ func TestExecute_DomainRetryPolicy_And_RealBreaker(t *testing.T) {
 		api := &fakeProviderAPI{resp: execute.Response{StatusCode: 429, RetryAfter: "180"}}
 		acker := &fakeAcker{}
 		uc := execute.New(store, &fakeReqGetter{req: sampleReq()}, api, &fakeBlobStore{}, acker, domPol, clk, discardLogger(), execute.Config{OwnerID: "w1"})
-		if err := uc.Execute(context.Background(), sampleMsg()); err != nil {
+		if _, err := uc.Execute(context.Background(), sampleMsg()); err != nil {
 			t.Fatalf("Execute 429: %v", err)
 		}
 		if store.scheduleCalls != 1 || store.scheduledInfo.ErrorClass != "THROTTLED" || acker.lastDelay != 3*time.Minute {
@@ -63,7 +63,7 @@ func TestExecute_DomainRetryPolicy_And_RealBreaker(t *testing.T) {
 		api := &fakeProviderAPI{resp: execute.Response{StatusCode: 401}}
 		acker := &fakeAcker{}
 		uc := execute.New(store, &fakeReqGetter{req: sampleReq()}, api, &fakeBlobStore{}, acker, domPol, clk, discardLogger(), execute.Config{OwnerID: "w1"})
-		if err := uc.Execute(context.Background(), sampleMsg()); err != nil {
+		if _, err := uc.Execute(context.Background(), sampleMsg()); err != nil {
 			t.Fatalf("Execute 401: %v", err)
 		}
 		if api.calls != 1 || store.failPermCalls != 1 || store.failedInfo.ErrorClass != "AUTH" || acker.acks != 1 {
@@ -77,7 +77,7 @@ func TestExecute_DomainRetryPolicy_And_RealBreaker(t *testing.T) {
 		api := &fakeProviderAPI{err: errors.New("failed Authorization: Bearer supersecret.jwt.token user=a@b.com")}
 		acker := &fakeAcker{}
 		uc := execute.New(store, &fakeReqGetter{req: sampleReq()}, api, &fakeBlobStore{}, acker, domPol, clk, discardLogger(), execute.Config{OwnerID: "w1"})
-		if err := uc.Execute(context.Background(), sampleMsg()); err != nil {
+		if _, err := uc.Execute(context.Background(), sampleMsg()); err != nil {
 			t.Fatalf("Execute transport err: %v", err)
 		}
 		if strings.Contains(store.scheduledInfo.ErrorMessage, "supersecret") || strings.Contains(store.scheduledInfo.ErrorMessage, "a@b.com") {
@@ -105,7 +105,7 @@ func TestExecute_DomainRetryPolicy_And_RealBreaker(t *testing.T) {
 
 		uc := execute.New(store, &fakeReqGetter{req: sampleReq()}, api, &fakeBlobStore{}, acker, domPol, brkClk, discardLogger(), execute.Config{OwnerID: "w1"}).
 			WithBreaker(brk).WithMetrics(met)
-		if err := uc.Execute(context.Background(), sampleMsg()); err != nil {
+		if _, err := uc.Execute(context.Background(), sampleMsg()); err != nil {
 			t.Fatalf("Execute open breaker: %v", err)
 		}
 		if api.calls != 0 || len(store.events) != 0 || acker.nacks != 1 || acker.lastDelay != 60*time.Second {
@@ -123,7 +123,7 @@ func TestExecute_DomainRetryPolicy_And_RealBreaker(t *testing.T) {
 		api := &fakeProviderAPI{}
 		acker := &fakeAcker{}
 		uc := execute.New(store, &fakeReqGetter{req: sampleReq()}, api, &fakeBlobStore{}, acker, domPol, clk, discardLogger(), execute.Config{OwnerID: "w1"})
-		if err := uc.Execute(context.Background(), sampleMsg()); err == nil {
+		if _, err := uc.Execute(context.Background(), sampleMsg()); err == nil {
 			t.Fatalf("expected error on DynamoDB acquire failure")
 		}
 		if api.calls != 0 || acker.nacks != 1 {
