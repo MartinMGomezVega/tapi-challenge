@@ -33,11 +33,13 @@ type SQSAPI interface {
 	ReceiveMessage(ctx context.Context, params *sqs.ReceiveMessageInput, optFns ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error)
 	DeleteMessage(ctx context.Context, params *sqs.DeleteMessageInput, optFns ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error)
 	ChangeMessageVisibility(ctx context.Context, params *sqs.ChangeMessageVisibilityInput, optFns ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityOutput, error)
+	ChangeMessageVisibilityBatch(ctx context.Context, params *sqs.ChangeMessageVisibilityBatchInput, optFns ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityBatchOutput, error)
 }
 
-// Handler processes one SQS FIFO message.
+// Handler processes one SQS FIFO message and reports whether the group batch may continue (OutcomeDone)
+// or must release remaining queued messages in the same MessageGroupId (OutcomeDeferred).
 type Handler interface {
-	Execute(ctx context.Context, msg execute.Message) error
+	Execute(ctx context.Context, msg execute.Message) (execute.HandleOutcome, error)
 }
 
 // ConsumerConfig configures the SQS FIFO consumer pipeline (003 FR-001, FR-005, US4, US5).
@@ -252,7 +254,7 @@ func (c *Consumer) processGroup(stopCtx, execCtx context.Context, rawMsgs []sqst
 				c.runHeartbeat(hbCtx, msg)
 			}()
 
-			err = handler.Execute(execCtx, msg)
+			_, err = handler.Execute(execCtx, msg)
 			stopHB()
 			<-hbDone
 

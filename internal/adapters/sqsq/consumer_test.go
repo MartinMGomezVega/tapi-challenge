@@ -21,13 +21,20 @@ import (
 )
 
 type fakeSQSClient struct {
-	mu           sync.Mutex
-	batches      [][]sqstypes.Message
-	maxRequested int32
-	receiveCalls int
-	deleted      []string
-	visChanges   map[string][]int32
-	onReceive    func(maxMsgs int32)
+	mu                sync.Mutex
+	batches           [][]sqstypes.Message
+	maxRequested      int32
+	receiveCalls      int
+	deleted           []string
+	visChanges        map[string][]int32
+	batchVisChanges   map[string][]int32
+	onReceive         func(maxMsgs int32)
+	trackVisibility   bool
+	visibilityTimeout time.Duration
+	visibleAt         map[string]time.Time
+	deletedSet        map[string]bool
+	rawByRH           map[string]sqstypes.Message
+	redelivered       []string
 }
 
 func (f *fakeSQSClient) ReceiveMessage(ctx context.Context, in *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
@@ -41,6 +48,33 @@ func (f *fakeSQSClient) ReceiveMessage(ctx context.Context, in *sqs.ReceiveMessa
 	if len(f.batches) > 0 {
 		batch = f.batches[0]
 		f.batches = f.batches[1:]
+		if f.trackVisibility {
+			if f.visibleAt == nil {
+				f.visibleAt = make(map[string]time.Time)
+				f.deletedSet = make(map[string]bool)
+				f.rawByRH = make(map[string]sqstypes.Message)
+			}
+			vt := f.visibilityTimeout
+			if vt <= 0 {
+				vt = time.Duration(in.VisibilityTimeout) * time.Second
+			}
+			exp := time.Now().Add(vt)
+			for _, m := range batch {
+				rh := aws.ToString(m.ReceiptHandle)
+				f.visibleAt[rh] = exp
+				f.rawByRH[rh] = m
+			}
+		}
+	} else if f.trackVisibility {
+		// Simulate SQS re-delivering any non-deleted message whose visibility timeout expired.
+		now := time.Now()
+		for rh, exp := range f.visibleAt {
+			if !f.deletedSet[rh] && !now.Before(exp) {
+				f.redelivered = append(f.redelivered, rh)
+				f.visibleAt[rh] = now.Add(f.visibilityTimeout)
+				batch = append(batch, f.rawByRH[rh])
+			}
+		}
 	}
 	f.mu.Unlock()
 
@@ -53,7 +87,7 @@ func (f *fakeSQSClient) ReceiveMessage(ctx context.Context, in *sqs.ReceiveMessa
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case <-time.After(5 * time.Millisecond):
+	case <-time.After(15 * time.Millisecond):
 		return &sqs.ReceiveMessageOutput{}, nil
 	}
 }
@@ -61,7 +95,11 @@ func (f *fakeSQSClient) ReceiveMessage(ctx context.Context, in *sqs.ReceiveMessa
 func (f *fakeSQSClient) DeleteMessage(_ context.Context, in *sqs.DeleteMessageInput, _ ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.deleted = append(f.deleted, aws.ToString(in.ReceiptHandle))
+	rh := aws.ToString(in.ReceiptHandle)
+	f.deleted = append(f.deleted, rh)
+	if f.deletedSet != nil {
+		f.deletedSet[rh] = true
+	}
 	return &sqs.DeleteMessageOutput{}, nil
 }
 
@@ -73,7 +111,31 @@ func (f *fakeSQSClient) ChangeMessageVisibility(_ context.Context, in *sqs.Chang
 	}
 	rh := aws.ToString(in.ReceiptHandle)
 	f.visChanges[rh] = append(f.visChanges[rh], in.VisibilityTimeout)
+	if f.visibleAt != nil && !f.deletedSet[rh] {
+		f.visibleAt[rh] = time.Now().Add(time.Duration(in.VisibilityTimeout) * time.Second)
+	}
 	return &sqs.ChangeMessageVisibilityOutput{}, nil
+}
+
+func (f *fakeSQSClient) ChangeMessageVisibilityBatch(_ context.Context, in *sqs.ChangeMessageVisibilityBatchInput, _ ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityBatchOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.batchVisChanges == nil {
+		f.batchVisChanges = make(map[string][]int32)
+	}
+	if f.visChanges == nil {
+		f.visChanges = make(map[string][]int32)
+	}
+	now := time.Now()
+	for _, entry := range in.Entries {
+		rh := aws.ToString(entry.ReceiptHandle)
+		f.batchVisChanges[rh] = append(f.batchVisChanges[rh], entry.VisibilityTimeout)
+		f.visChanges[rh] = append(f.visChanges[rh], entry.VisibilityTimeout)
+		if f.visibleAt != nil && !f.deletedSet[rh] {
+			f.visibleAt[rh] = now.Add(time.Duration(entry.VisibilityTimeout) * time.Second)
+		}
+	}
+	return &sqs.ChangeMessageVisibilityBatchOutput{}, nil
 }
 
 func makeSQSMsg(id, provider, rh string) sqstypes.Message {
@@ -94,9 +156,11 @@ func makeSQSMsg(id, provider, rh string) sqstypes.Message {
 	}
 }
 
-type handlerFunc func(ctx context.Context, msg execute.Message) error
+type handlerFunc func(ctx context.Context, msg execute.Message) (execute.HandleOutcome, error)
 
-func (f handlerFunc) Execute(ctx context.Context, msg execute.Message) error { return f(ctx, msg) }
+func (f handlerFunc) Execute(ctx context.Context, msg execute.Message) (execute.HandleOutcome, error) {
+	return f(ctx, msg)
+}
 
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -131,7 +195,7 @@ func TestConsumer_SameGroupProcessedSequentially(t *testing.T) {
 		order       []string
 	)
 
-	h := handlerFunc(func(ctx context.Context, msg execute.Message) error {
+	h := handlerFunc(func(ctx context.Context, msg execute.Message) (execute.HandleOutcome, error) {
 		cur := inflight.Add(1)
 		for {
 			prev := maxInflight.Load()
@@ -147,7 +211,7 @@ func TestConsumer_SameGroupProcessedSequentially(t *testing.T) {
 		if processed.Add(1) == 6 {
 			cancel()
 		}
-		return consumer.Ack(ctx, msg)
+		return execute.OutcomeDone, consumer.Ack(ctx, msg)
 	})
 
 	if err := consumer.Run(ctx, h); err != nil {
@@ -194,19 +258,19 @@ func TestConsumer_DistinctGroupsProcessedInParallel(t *testing.T) {
 	allEntered := make(chan struct{})
 	var done atomic.Int32
 
-	h := handlerFunc(func(ctx context.Context, msg execute.Message) error {
+	h := handlerFunc(func(ctx context.Context, msg execute.Message) (execute.HandleOutcome, error) {
 		if entered.Add(1) == 3 {
 			close(allEntered)
 		}
 		select {
 		case <-allEntered:
 		case <-ctx.Done():
-			return ctx.Err()
+			return execute.OutcomeDeferred, ctx.Err()
 		}
 		if done.Add(1) == 3 {
 			cancel()
 		}
-		return consumer.Ack(ctx, msg)
+		return execute.OutcomeDone, consumer.Ack(ctx, msg)
 	})
 
 	if err := consumer.Run(ctx, h); err != nil {
@@ -251,14 +315,14 @@ func TestConsumer_PreAcquiresSemaphoreSlotsBeforeReceive(t *testing.T) {
 	defer cancel()
 
 	var done atomic.Int32
-	h := handlerFunc(func(ctx context.Context, msg execute.Message) error {
+	h := handlerFunc(func(ctx context.Context, msg execute.Message) (execute.HandleOutcome, error) {
 		inflight.Add(1)
 		time.Sleep(25 * time.Millisecond)
 		inflight.Add(-1)
 		if done.Add(1) == 2 {
 			cancel()
 		}
-		return consumer.Ack(ctx, msg)
+		return execute.OutcomeDone, consumer.Ack(ctx, msg)
 	})
 
 	if err := consumer.Run(ctx, h); err != nil {
@@ -297,7 +361,7 @@ func TestConsumer_GracefulShutdownFinishesInflightAndNacksPending(t *testing.T) 
 	var completed []string
 	var mu sync.Mutex
 
-	h := handlerFunc(func(execCtx context.Context, msg execute.Message) error {
+	h := handlerFunc(func(execCtx context.Context, msg execute.Message) (execute.HandleOutcome, error) {
 		if msg.RequestID == "r1" {
 			close(started)
 			time.Sleep(30 * time.Millisecond)
@@ -305,7 +369,7 @@ func TestConsumer_GracefulShutdownFinishesInflightAndNacksPending(t *testing.T) 
 		mu.Lock()
 		completed = append(completed, msg.RequestID)
 		mu.Unlock()
-		return consumer.Ack(execCtx, msg)
+		return execute.OutcomeDone, consumer.Ack(execCtx, msg)
 	})
 
 	go func() {
@@ -328,5 +392,134 @@ func TestConsumer_GracefulShutdownFinishesInflightAndNacksPending(t *testing.T) 
 	vis := fake.visChanges["rh-2"]
 	if len(vis) == 0 || vis[len(vis)-1] != 0 {
 		t.Fatalf("expected rh-2 to be Nack(0), got visChanges=%v", fake.visChanges)
+	}
+}
+
+// Review Finding 2: Batch of 5 messages in same MessageGroupId where #2 returns OutcomeDeferred ->
+// #3, #4, #5 must NOT be executed and must receive Nack(0).
+func TestConsumer_DeferredMessageAbortsRestOfGroupWithNack0(t *testing.T) {
+	t.Parallel()
+
+	var batch []sqstypes.Message
+	for i := 1; i <= 5; i++ {
+		id := "m" + string(rune('0'+i))
+		batch = append(batch, makeSQSMsg(id, "edenor", "rh-"+id))
+	}
+	fake := &fakeSQSClient{batches: [][]sqstypes.Message{batch}}
+
+	consumer := sqsq.NewConsumer(fake, sqsq.ConsumerConfig{
+		QueueURL:          "https://sqs.local/q.fifo",
+		Receivers:         1,
+		MaxInflight:       10,
+		VisibilityTimeout: 60 * time.Second,
+		ShutdownTimeout:   5 * time.Second,
+	}, discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var (
+		mu       sync.Mutex
+		executed []string
+	)
+	h := handlerFunc(func(execCtx context.Context, msg execute.Message) (execute.HandleOutcome, error) {
+		mu.Lock()
+		executed = append(executed, msg.RequestID)
+		mu.Unlock()
+		if msg.RequestID == "m2" {
+			// Simulate RetryLater / BreakerOpen / FailExhausted backoff on m2.
+			_ = consumer.Nack(execCtx, msg, 30*time.Second)
+			// Allow processGroup to release m3..m5 before cancelling consumer loop.
+			go func() {
+				time.Sleep(25 * time.Millisecond)
+				cancel()
+			}()
+			return execute.OutcomeDeferred, nil
+		}
+		return execute.OutcomeDone, consumer.Ack(execCtx, msg)
+	})
+
+	if err := consumer.Run(ctx, h); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(executed) != 2 || executed[0] != "m1" || executed[1] != "m2" {
+		t.Fatalf("executed = %v, want [m1 m2] only (m3..m5 must not hit degraded provider)", executed)
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	for _, rh := range []string{"rh-m3", "rh-m4", "rh-m5"} {
+		vis := fake.visChanges[rh]
+		if len(vis) == 0 || vis[len(vis)-1] != 0 {
+			t.Fatalf("expected %s to receive Nack(0), got visChanges=%v", rh, fake.visChanges)
+		}
+	}
+}
+
+// Review Finding 3: Short VT (2s) with slow handler across a 4-message group batch (~2.8s total > VT) ->
+// group-level ChangeMessageVisibilityBatch heartbeat keeps waiting messages from expiring or re-delivering.
+func TestConsumer_GroupHeartbeatExtendsWaitingMessages(t *testing.T) {
+	t.Parallel()
+
+	var batch []sqstypes.Message
+	for i := 1; i <= 4; i++ {
+		id := "w" + string(rune('0'+i))
+		batch = append(batch, makeSQSMsg(id, "edenor", "rh-"+id))
+	}
+	fake := &fakeSQSClient{
+		batches:           [][]sqstypes.Message{batch},
+		trackVisibility:   true,
+		visibilityTimeout: 2 * time.Second,
+	}
+
+	consumer := sqsq.NewConsumer(fake, sqsq.ConsumerConfig{
+		QueueURL:          "https://sqs.local/q.fifo",
+		Receivers:         1,
+		MaxInflight:       10,
+		VisibilityTimeout: 2 * time.Second,
+		ShutdownTimeout:   5 * time.Second,
+	}, discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var (
+		mu       sync.Mutex
+		executed []string
+		doneCnt  atomic.Int32
+	)
+	h := handlerFunc(func(execCtx context.Context, msg execute.Message) (execute.HandleOutcome, error) {
+		time.Sleep(700 * time.Millisecond) // 4 * 700ms = 2.8s > 2s VT
+		mu.Lock()
+		executed = append(executed, msg.RequestID)
+		mu.Unlock()
+		err := consumer.Ack(execCtx, msg)
+		if doneCnt.Add(1) == 4 {
+			cancel()
+		}
+		return execute.OutcomeDone, err
+	})
+
+	if err := consumer.Run(ctx, h); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.redelivered) != 0 {
+		t.Fatalf("waiting messages expired VT and were re-delivered: %v", fake.redelivered)
+	}
+	// Waiting message w4 (last in batch) must have been extended via ChangeMessageVisibilityBatch while waiting!
+	if len(fake.batchVisChanges["rh-w4"]) == 0 {
+		t.Fatalf("expected waiting message rh-w4 to be extended via ChangeMessageVisibilityBatch, got batchVisChanges=%v", fake.batchVisChanges)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(executed) != 4 {
+		t.Fatalf("executed = %v (len=%d), want exactly 4 without duplicates", executed, len(executed))
 	}
 }
