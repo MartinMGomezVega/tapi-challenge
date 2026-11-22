@@ -19,7 +19,7 @@ Go ≥ 1.25 · sin dependencias nuevas (el breaker es propio, ~80 líneas, o `so
 ## Diseño
 
 ### Por qué `ChangeMessageVisibility` y no un `DelaySeconds` por mensaje
-Las colas FIFO **no admiten delay por mensaje**. Re-encolar un mensaje nuevo rompería el orden y la exclusividad del grupo. `ChangeMessageVisibility` sobre el mensaje en vuelo mantiene el grupo bloqueado durante el backoff. Ese es justamente el *backpressure* deseado para un proveedor con problemas, y no afecta a los otros grupos (ADR-006).
+Las colas FIFO **no admiten delay por mensaje**. Re-encolar un mensaje nuevo rompería el orden y la exclusividad del grupo. `ChangeMessageVisibility` sobre el mensaje en vuelo mantiene el grupo bloqueado durante el backoff. Ese es justamente el *backpressure* deseado para un proveedor con problemas, y no afecta a los otros grupos (ADR-006). Además, cuando un batch de SQS contiene varios mensajes del mismo grupo y uno de ellos resulta diferido (`OutcomeDeferred`), `processGroup` aborta el resto de ese grupo y libera los mensajes pendientes con `Nack(0)` para no seguir golpeando al proveedor degradado.
 
 ### Decisión
 ```go

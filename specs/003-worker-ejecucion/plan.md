@@ -29,6 +29,8 @@ SQS FIFO ───┼─ receiver#2 ─┼──► chan Message (cap k) ┼─ 
 - Cada receptor **adquiere los cupos del semáforo antes** de `ReceiveMessage` (`MaxNumberOfMessages = cupos libres ≤ 10`), así nunca hay mensajes retenidos sin procesar consumiendo su visibility timeout (US4.2).
 - `R = 2`, `k = 32` por defecto. El presupuesto global se valida en el arranque.
 - En FIFO, un `ReceiveMessage` puede devolver varios mensajes **del mismo grupo**, pero en orden. Para no paralelizarlos dentro de un mismo task, los mensajes de un batch se agrupan por `MessageGroupId` y cada grupo se procesa **secuencialmente en una goroutine**. Este detalle es fácil de pasar por alto y es crítico.
+- **Heartbeat de visibilidad a nivel de grupo**: un ticker cada `VT/2` ejecuta `ChangeMessageVisibilityBatch` sobre el mensaje en curso y todos los mensajes en espera del mismo grupo, evitando que los encolados en el batch superen el visibility timeout antes de empezar.
+- **Corte temprano ante diferimiento (`OutcomeDone | OutcomeDeferred`)**: si `Execute` devuelve `OutcomeDeferred` (backoff, breaker abierto, `FAILED_EXHAUSTED`, `LeasedByOther` o error de persistencia), `processGroup` no ejecuta los mensajes restantes de ese grupo y los libera inmediatamente con `Nack(0)`.
 
 ### Caso de uso `ExecuteRequest(msg)`
 ```
