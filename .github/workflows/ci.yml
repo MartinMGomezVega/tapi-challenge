@@ -68,6 +68,7 @@ jobs:
     name: Build ARM64 Images & Trivy Scan
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         service: [dispatcher, worker, reconciler]
     steps:
@@ -80,16 +81,17 @@ jobs:
           context: .
           file: build/${{ matrix.service }}.Dockerfile
           platforms: linux/arm64
-          load: false
           tags: tapi-${{ matrix.service }}:${{ github.sha }}
           outputs: type=docker,dest=/tmp/${{ matrix.service }}.tar
+      # Trivy se ejecuta con su imagen Docker oficial (sin depender de versiones de la GitHub Action).
       - name: Trivy vulnerability scan (fail on CRITICAL)
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          input: /tmp/${{ matrix.service }}.tar
-          severity: CRITICAL,HIGH
-          exit-code: "1"
-          ignore-unfixed: true
+        run: |
+          docker run --rm -v /tmp:/scan aquasec/trivy:latest image \
+            --input /scan/${{ matrix.service }}.tar \
+            --severity CRITICAL \
+            --ignore-unfixed \
+            --exit-code 1 \
+            --no-progress
 
   terraform-validate-and-security:
     name: Terraform Validate, Test, TFLint & Checkov

@@ -1,5 +1,10 @@
 name: CD
 
+# Despliegue a una cuenta real de AWS (ECR + Terraform apply + ECS) con OIDC.
+# Requiere una cuenta AWS configurada, así que está DESACTIVADO por defecto:
+# los jobs se saltean salvo que exista la variable de repositorio AWS_DEPLOY_ENABLED=true
+# y los secrets AWS_OIDC_*_ROLE_ARN. Todo lo verificable sin AWS (tests, LocalStack,
+# imágenes, Terraform validate/test con mocks, Checkov) corre en el workflow CI.
 on:
   push:
     branches: [main]
@@ -15,6 +20,7 @@ env:
 jobs:
   build-and-push:
     name: Build & Push Immutable ARM64 Images (SHA)
+    if: ${{ vars.AWS_DEPLOY_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
