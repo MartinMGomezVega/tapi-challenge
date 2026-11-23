@@ -28,6 +28,7 @@ type fakeSQSClient struct {
 	deleted           []string
 	visChanges        map[string][]int32
 	batchVisChanges   map[string][]int32
+	batchFailEntries  []sqstypes.BatchResultErrorEntry
 	onReceive         func(maxMsgs int32)
 	trackVisibility   bool
 	visibilityTimeout time.Duration
@@ -135,7 +136,9 @@ func (f *fakeSQSClient) ChangeMessageVisibilityBatch(_ context.Context, in *sqs.
 			f.visibleAt[rh] = now.Add(time.Duration(entry.VisibilityTimeout) * time.Second)
 		}
 	}
-	return &sqs.ChangeMessageVisibilityBatchOutput{}, nil
+	return &sqs.ChangeMessageVisibilityBatchOutput{
+		Failed: f.batchFailEntries,
+	}, nil
 }
 
 func makeSQSMsg(id, provider, rh string) sqstypes.Message {
@@ -521,5 +524,103 @@ func TestConsumer_GroupHeartbeatExtendsWaitingMessages(t *testing.T) {
 	defer mu.Unlock()
 	if len(executed) != 4 {
 		t.Fatalf("executed = %v (len=%d), want exactly 4 without duplicates", executed, len(executed))
+	}
+}
+
+// Review-2 Finding 2a: Handler calls Nack(30s) inside Execute and a heartbeat tick fires immediately
+// afterwards before Execute returns -> final visibility MUST remain 30s, never overwritten to VT.
+func TestConsumer_HeartbeatDoesNotOverwriteNackBackoff(t *testing.T) {
+	t.Parallel()
+
+	batch := []sqstypes.Message{
+		makeSQSMsg("d1", "edenor", "rh-d1"),
+		makeSQSMsg("d2", "edenor", "rh-d2"),
+	}
+	fake := &fakeSQSClient{batches: [][]sqstypes.Message{batch}}
+
+	// VT = 1s -> heartbeat ticks every 500ms.
+	consumer := sqsq.NewConsumer(fake, sqsq.ConsumerConfig{
+		QueueURL:          "https://sqs.local/q.fifo",
+		Receivers:         1,
+		MaxInflight:       4,
+		VisibilityTimeout: 1 * time.Second,
+		ShutdownTimeout:   5 * time.Second,
+	}, discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	h := handlerFunc(func(execCtx context.Context, msg execute.Message) (execute.HandleOutcome, error) {
+		// Defer message with 30s backoff, then linger > 1 heartbeat interval before returning!
+		if err := consumer.Nack(execCtx, msg, 30*time.Second); err != nil {
+			t.Errorf("Nack(30s): %v", err)
+		}
+		time.Sleep(750 * time.Millisecond) // crosses the 500ms heartbeat tick while still inside Execute
+		go func() {
+			time.Sleep(30 * time.Millisecond)
+			cancel()
+		}()
+		return execute.OutcomeDeferred, nil
+	})
+
+	if err := consumer.Run(ctx, h); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	vis := fake.visChanges["rh-d1"]
+	if len(vis) == 0 || vis[len(vis)-1] != 30 {
+		t.Fatalf("final visibility for deferred rh-d1 = %v, want last value 30 (heartbeat must not overwrite backoff)", vis)
+	}
+	// Waiting message d2 must be released with Nack(0).
+	vis2 := fake.visChanges["rh-d2"]
+	if len(vis2) == 0 || vis2[len(vis2)-1] != 0 {
+		t.Fatalf("expected waiting rh-d2 to receive Nack(0), got %v", vis2)
+	}
+}
+
+// Review-2 Finding 2b: extendBatch inspects Failed entries in ChangeMessageVisibilityBatchOutput and counts/logs them.
+func TestConsumer_ExtendBatchCountsPartialFailures(t *testing.T) {
+	t.Parallel()
+
+	batch := []sqstypes.Message{
+		makeSQSMsg("f1", "edenor", "rh-f1"),
+	}
+	fake := &fakeSQSClient{
+		batches: [][]sqstypes.Message{batch},
+		batchFailEntries: []sqstypes.BatchResultErrorEntry{
+			{
+				Id:          aws.String("0"),
+				Code:        aws.String("ReceiptHandleIsInvalid"),
+				Message:     aws.String("receipt handle expired"),
+				SenderFault: true,
+			},
+		},
+	}
+
+	consumer := sqsq.NewConsumer(fake, sqsq.ConsumerConfig{
+		QueueURL:          "https://sqs.local/q.fifo",
+		Receivers:         1,
+		MaxInflight:       4,
+		VisibilityTimeout: 1 * time.Second,
+		ShutdownTimeout:   5 * time.Second,
+	}, discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	h := handlerFunc(func(execCtx context.Context, msg execute.Message) (execute.HandleOutcome, error) {
+		time.Sleep(650 * time.Millisecond) // triggers at least 1 heartbeat tick (500ms)
+		err := consumer.Ack(execCtx, msg)
+		cancel()
+		return execute.OutcomeDone, err
+	})
+
+	if err := consumer.Run(ctx, h); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got := consumer.HeartbeatFailures(); got < 1 {
+		t.Fatalf("HeartbeatFailures() = %d, want >= 1 for partial ChangeMessageVisibilityBatch failure", got)
 	}
 }

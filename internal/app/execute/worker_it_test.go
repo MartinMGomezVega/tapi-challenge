@@ -11,6 +11,7 @@ import (
 	"math"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -487,7 +488,11 @@ func TestWorker_LocalStack_EndToEndThroughput(t *testing.T) {
 	)
 
 	runCtx, stopWorkers := context.WithCancel(ctx)
-	var wg sync.WaitGroup
+	var (
+		wg               sync.WaitGroup
+		topProviderNanos atomic.Int64
+	)
+	const topProvider = "zipf-00"
 	start := time.Now()
 
 	for w := range numWorkers {
@@ -501,6 +506,219 @@ func TestWorker_LocalStack_EndToEndThroughput(t *testing.T) {
 		}, logger)
 		uc := execute.New(execRepo, reqRepo, apiClient, blobStore, consumer, domPol, clk, logger, execute.Config{
 			OwnerID: fmt.Sprintf("e2e-worker-%d", w),
+		})
+		h := &providerTimingHandler{
+			inner:          uc,
+			targetProvider: topProvider,
+			accumNanos:     &topProviderNanos,
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = consumer.Run(runCtx, h)
+		}()
+	}
+
+	deadline := time.Now().Add(5 * time.Minute)
+	for time.Now().Before(deadline) {
+		if mockSrv.Stats().TotalCalls >= totalMsgs {
+			attrOut, _ := env.SQS.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+				QueueUrl: aws.String(qURL),
+				AttributeNames: []sqstypes.QueueAttributeName{
+					sqstypes.QueueAttributeNameApproximateNumberOfMessages,
+					sqstypes.QueueAttributeNameApproximateNumberOfMessagesNotVisible,
+				},
+			})
+			if attrOut.Attributes["ApproximateNumberOfMessages"] == "0" &&
+				attrOut.Attributes["ApproximateNumberOfMessagesNotVisible"] == "0" {
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	wall := time.Since(start)
+
+	stopWorkers()
+	wg.Wait()
+
+	snap := mockSrv.Stats()
+	rps := float64(snap.TotalCalls) / wall.Seconds()
+	topSerial := time.Duration(topProviderNanos.Load())
+	avgTopMs := float64(topSerial.Microseconds()) / 1000.0 / float64(counts[0])
+	ratio := float64(wall) / float64(max(topSerial, time.Millisecond))
+
+	t.Logf("E2E_LOCALSTACK_ZIPF_REPORT: providers=%d msgs=%d workers=%d inflight_per_worker=%d top_provider_msgs=%d top_provider_avg_ms=%.2f top_provider_serial_time=%v wall=%v wall_over_serial_ratio=%.3f throughput=%.1f req/s max_provider_inflight=%d global_max_inflight=%d dup_idem=%d",
+		numProviders, totalMsgs, numWorkers, inflightPerWorker, counts[0], avgTopMs, topSerial.Round(time.Millisecond),
+		wall.Round(time.Millisecond), ratio, rps,
+		snap.MaxProviderInflight, snap.GlobalMaxInflight, snap.DuplicateIdemKeys)
+
+	if snap.TotalCalls != totalMsgs {
+		t.Fatalf("TotalCalls = %d, want %d", snap.TotalCalls, totalMsgs)
+	}
+	if snap.MaxProviderInflight != 1 {
+		t.Fatalf("SC-001 VIOLATION: real LocalStack FIFO MaxProviderInflight = %d, want 1", snap.MaxProviderInflight)
+	}
+	if snap.DuplicateIdemKeys != 0 {
+		t.Fatalf("SC-002 VIOLATION: DuplicateIdemKeys = %d, want 0", snap.DuplicateIdemKeys)
+	}
+	// Verify wall time does not exceed the top Zipf provider's serial execution chain by > 20%
+	// (proves the remaining 49 providers ran concurrently behind zipf-00 without system-level serialization).
+	maxAllowedWall := time.Duration(float64(topSerial) * 1.20)
+	if topSerial > 0 && wall > maxAllowedWall {
+		t.Fatalf("wall (%v) exceeded 1.20 * top_provider_serial_time (%v = %v * 1.20)", wall, maxAllowedWall, topSerial)
+	}
+}
+
+type providerTimingHandler struct {
+	inner          sqsq.Handler
+	targetProvider string
+	accumNanos     *atomic.Int64
+}
+
+func (h *providerTimingHandler) Execute(ctx context.Context, msg execute.Message) (execute.HandleOutcome, error) {
+	if msg.Provider == h.targetProvider {
+		t0 := time.Now()
+		out, err := h.inner.Execute(ctx, msg)
+		h.accumNanos.Add(time.Since(t0).Nanoseconds())
+		return out, err
+	}
+	return h.inner.Execute(ctx, msg)
+}
+
+// Review-2 Finding 1: Real LocalStack End-to-End Throughput test with 200 UNIFORM providers x 10 messages = 2,000 messages.
+// Eliminates the Zipf top-1 serial tail so wall time reflects true parallel E2E system throughput in LocalStack.
+func TestWorker_LocalStack_EndToEndThroughput_Uniform(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping 200-provider uniform LocalStack E2E throughput test in -short mode")
+	}
+
+	env := testenv.StartLocalStack(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	defer cancel()
+
+	const (
+		reqTable          = "e2e-uniform-reqs"
+		execTable         = "e2e-uniform-execs"
+		bucket            = "e2e-uniform-bucket"
+		queueName         = "e2e-uniform.fifo"
+		dlqName           = "e2e-uniform-dlq.fifo"
+		numProviders      = 200
+		perProvider       = 10
+		totalMsgs         = numProviders * perProvider // 2,000 messages
+		numWorkers        = 4
+		inflightPerWorker = 16
+		apiLatency        = 2 * time.Millisecond
+	)
+
+	if err := env.EnsureRequestsTable(ctx, reqTable); err != nil {
+		t.Fatalf("EnsureRequestsTable: %v", err)
+	}
+	if err := env.EnsureExecutionsTable(ctx, execTable); err != nil {
+		t.Fatalf("EnsureExecutionsTable: %v", err)
+	}
+	if err := env.EnsureBucket(ctx, bucket); err != nil {
+		t.Fatalf("EnsureBucket: %v", err)
+	}
+	qURL, _, err := env.EnsureFIFOQueue(ctx, queueName, dlqName)
+	if err != nil {
+		t.Fatalf("EnsureFIFOQueue: %v", err)
+	}
+
+	date := domain.RunDate("2026-11-21")
+	now := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)
+	reqs := make([]domain.Request, 0, totalMsgs)
+	msgs := make([]dispatch.JobMessage, 0, totalMsgs)
+	// Interleave providers when enqueuing so all 200 FIFO groups are immediately available to the 4 workers.
+	for i := range perProvider {
+		for p := range numProviders {
+			prov := fmt.Sprintf("unif-%03d", p)
+			id := fmt.Sprintf("u-%03d-%02d", p, i)
+			reqs = append(reqs, domain.Request{
+				ID: id, Provider: prov, Endpoint: fmt.Sprintf("/providers/%s/query", prov),
+				Method: "POST", Body: []byte(`{"q":1}`), Enabled: true,
+				Slot: (p*perProvider + i) % domain.SlotsPerDay, Shard: 0, Version: 1, CreatedAt: now, UpdatedAt: now,
+			})
+			msgs = append(msgs, dispatch.JobMessage{
+				RequestID: id, RunDate: date, Provider: prov, Slot: (p*perProvider + i) % domain.SlotsPerDay, DispatchedAt: now,
+			})
+		}
+	}
+
+	reqRepo := dynamo.NewRequestsRepo(env.DynamoDB, reqTable)
+	execRepo := dynamo.NewExecutionsRepo(env.DynamoDB, execTable, dynamo.DefaultExecutionTTL)
+	blobStore := s3blob.New(env.S3, bucket)
+	producer := sqsq.NewQueue(env.SQS, qURL)
+
+	if err := reqRepo.PutBatch(ctx, reqs); err != nil {
+		t.Fatalf("PutBatch requests: %v", err)
+	}
+	seedGrp, seedCtx := errgroup.WithContext(ctx)
+	seedGrp.SetLimit(32)
+	for _, m := range msgs {
+		seedGrp.Go(func() error {
+			_, err := execRepo.CreatePending(seedCtx, m.RequestID, m.RunDate, m.Provider, m.Slot, now)
+			return err
+		})
+	}
+	if err := seedGrp.Wait(); err != nil {
+		t.Fatalf("CreatePending seed: %v", err)
+	}
+
+	enqGrp, enqCtx := errgroup.WithContext(ctx)
+	enqGrp.SetLimit(16)
+	for start := 0; start < len(msgs); start += 10 {
+		chunk := msgs[start:min(start+10, len(msgs))]
+		enqGrp.Go(func() error {
+			failed, err := producer.SendBatch(enqCtx, chunk)
+			if err != nil {
+				return err
+			}
+			if len(failed) > 0 {
+				return fmt.Errorf("SendBatch had %d failed entries", len(failed))
+			}
+			return nil
+		})
+	}
+	if err := enqGrp.Wait(); err != nil {
+		t.Fatalf("SendBatch seed: %v", err)
+	}
+
+	mockSrv := mockapi.New(mockapi.Config{DefaultLatency: apiLatency})
+	httpTS := httptest.NewServer(mockSrv)
+	defer httpTS.Close()
+
+	apiClient := httpapi.New(httpapi.Config{
+		BaseURL:             httpTS.URL,
+		Region:              "us-east-1",
+		Timeout:             10 * time.Second,
+		MaxIdleConnsPerHost: numWorkers * inflightPerWorker,
+		Credentials:         credentials.NewStaticCredentialsProvider("test", "test", ""),
+	})
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	clk, _ := clock.New(1)
+	domPol := execute.NewDomainRetryPolicy(
+		domain.NewClassifier(nil),
+		domain.NewRetryPolicy(domain.RetryPolicyConfig{}),
+		httpapi.TranslateOutcome,
+		clk,
+	)
+
+	runCtx, stopWorkers := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	start := time.Now()
+
+	for w := range numWorkers {
+		consumer := sqsq.NewConsumer(env.SQS, sqsq.ConsumerConfig{
+			QueueURL:          qURL,
+			Receivers:         2,
+			MaxInflight:       inflightPerWorker,
+			WaitTimeSeconds:   1,
+			VisibilityTimeout: 60 * time.Second,
+			ShutdownTimeout:   10 * time.Second,
+		}, logger)
+		uc := execute.New(execRepo, reqRepo, apiClient, blobStore, consumer, domPol, clk, logger, execute.Config{
+			OwnerID: fmt.Sprintf("unif-worker-%d", w),
 		})
 		wg.Add(1)
 		go func() {
@@ -533,15 +751,15 @@ func TestWorker_LocalStack_EndToEndThroughput(t *testing.T) {
 
 	snap := mockSrv.Stats()
 	rps := float64(snap.TotalCalls) / wall.Seconds()
-	t.Logf("E2E_LOCALSTACK_REPORT: providers=%d msgs=%d workers=%d inflight_per_worker=%d top_provider_msgs=%d wall=%v throughput=%.1f req/s max_provider_inflight=%d global_max_inflight=%d dup_idem=%d",
-		numProviders, totalMsgs, numWorkers, inflightPerWorker, counts[0], wall.Round(time.Millisecond), rps,
+	t.Logf("E2E_LOCALSTACK_UNIFORM_REPORT: providers=%d per_provider=%d msgs=%d workers=%d inflight_per_worker=%d wall=%v throughput=%.1f req/s max_provider_inflight=%d global_max_inflight=%d dup_idem=%d",
+		numProviders, perProvider, totalMsgs, numWorkers, inflightPerWorker, wall.Round(time.Millisecond), rps,
 		snap.MaxProviderInflight, snap.GlobalMaxInflight, snap.DuplicateIdemKeys)
 
 	if snap.TotalCalls != totalMsgs {
 		t.Fatalf("TotalCalls = %d, want %d", snap.TotalCalls, totalMsgs)
 	}
 	if snap.MaxProviderInflight != 1 {
-		t.Fatalf("SC-001 VIOLATION: real LocalStack FIFO MaxProviderInflight = %d, want 1", snap.MaxProviderInflight)
+		t.Fatalf("SC-001 VIOLATION: uniform LocalStack FIFO MaxProviderInflight = %d, want 1", snap.MaxProviderInflight)
 	}
 	if snap.DuplicateIdemKeys != 0 {
 		t.Fatalf("SC-002 VIOLATION: DuplicateIdemKeys = %d, want 0", snap.DuplicateIdemKeys)

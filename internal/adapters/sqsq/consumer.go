@@ -54,15 +54,25 @@ type ConsumerConfig struct {
 	ShutdownTimeout   time.Duration
 }
 
+// groupHeartbeatState synchronizes the group-level visibility heartbeat with Ack/Nack/Extend
+// so a heartbeat tick can never overwrite a backoff delay or extend an already-settled message.
+type groupHeartbeatState struct {
+	mu        sync.Mutex
+	activeIdx int
+	settled   map[string]bool
+}
+
 // Consumer polls SQS FIFO, pre-acquires semaphore slots before ReceiveMessage,
 // groups batches by MessageGroupId for sequential per-provider execution,
 // runs group-level visibility heartbeats, aborts a group batch on OutcomeDeferred,
 // and shuts down gracefully.
 type Consumer struct {
-	client SQSAPI
-	cfg    ConsumerConfig
-	logger *slog.Logger
-	tokens chan struct{}
+	client            SQSAPI
+	cfg               ConsumerConfig
+	logger            *slog.Logger
+	tokens            chan struct{}
+	groups            sync.Map // map[receiptHandle string]*groupHeartbeatState
+	heartbeatFailures atomic.Int64
 }
 
 // NewConsumer constructs an SQS FIFO Consumer.
@@ -244,14 +254,30 @@ func (c *Consumer) processGroup(stopCtx, execCtx context.Context, rawMsgs []sqst
 		return
 	}
 
-	// Group-level visibility heartbeat every VT/2 extending BOTH the active message and all waiting
-	// messages in this MessageGroupId batch via ChangeMessageVisibilityBatch (ADR-006).
-	var activeIdx atomic.Int32
+	// Register group state so Ack/Nack/Extend synchronize with the group-level heartbeat under gs.mu.
+	gs := &groupHeartbeatState{
+		settled: make(map[string]bool, len(items)),
+	}
+	for _, item := range items {
+		if item.ReceiptHandle != "" {
+			c.groups.Store(item.ReceiptHandle, gs)
+		}
+	}
+	defer func() {
+		for _, item := range items {
+			if item.ReceiptHandle != "" {
+				c.groups.Delete(item.ReceiptHandle)
+			}
+		}
+	}()
+
+	// Group-level visibility heartbeat every VT/2 extending BOTH the active unsettled message and all
+	// waiting messages in this MessageGroupId batch via ChangeMessageVisibilityBatch (ADR-006).
 	hbCtx, stopHB := context.WithCancel(execCtx)
 	hbDone := make(chan struct{})
 	go func() {
 		defer close(hbDone)
-		c.runGroupHeartbeat(hbCtx, items, &activeIdx)
+		c.runGroupHeartbeat(hbCtx, items, gs)
 	}()
 
 	hbStopped := false
@@ -284,7 +310,12 @@ func (c *Consumer) processGroup(stopCtx, execCtx context.Context, rawMsgs []sqst
 		}
 
 		outcome, err := handler.Execute(execCtx, msg)
-		activeIdx.Store(int32(i + 1)) //nolint:gosec // len(items) <= 10
+		gs.mu.Lock()
+		gs.activeIdx = i + 1
+		if msg.ReceiptHandle != "" {
+			gs.settled[msg.ReceiptHandle] = true
+		}
+		gs.mu.Unlock()
 		c.releaseSlots(1)
 
 		if err != nil && !errors.Is(err, context.Canceled) {
@@ -303,7 +334,7 @@ func (c *Consumer) processGroup(stopCtx, execCtx context.Context, rawMsgs []sqst
 	}
 }
 
-func (c *Consumer) runGroupHeartbeat(ctx context.Context, items []execute.Message, activeIdx *atomic.Int32) {
+func (c *Consumer) runGroupHeartbeat(ctx context.Context, items []execute.Message, gs *groupHeartbeatState) {
 	interval := max(c.cfg.VisibilityTimeout/2, minHeartbeatInterval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -313,14 +344,24 @@ func (c *Consumer) runGroupHeartbeat(ctx context.Context, items []execute.Messag
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			idx := int(activeIdx.Load())
-			if idx >= len(items) {
+			gs.mu.Lock()
+			if gs.activeIdx >= len(items) {
+				gs.mu.Unlock()
 				return
 			}
-			if err := c.extendBatch(ctx, items[idx:], c.cfg.VisibilityTimeout); err != nil && ctx.Err() == nil {
-				c.logger.Warn("group visibility heartbeat failed",
-					"provider", items[idx].Provider, "pending_count", len(items)-idx, "error", err)
+			pending := make([]execute.Message, 0, len(items)-gs.activeIdx)
+			for _, m := range items[gs.activeIdx:] {
+				if m.ReceiptHandle != "" && !gs.settled[m.ReceiptHandle] {
+					pending = append(pending, m)
+				}
 			}
+			if len(pending) > 0 {
+				if err := c.extendBatch(ctx, pending, c.cfg.VisibilityTimeout); err != nil && ctx.Err() == nil {
+					c.logger.Warn("group visibility heartbeat failed",
+						"provider", pending[0].Provider, "pending_count", len(pending), "error", err)
+				}
+			}
+			gs.mu.Unlock()
 		}
 	}
 }
@@ -333,12 +374,15 @@ func (c *Consumer) extendBatch(ctx context.Context, msgs []execute.Message, d ti
 	for start := 0; start < len(msgs); start += sqsMaxBatchReceive {
 		end := min(start+sqsMaxBatchReceive, len(msgs))
 		entries := make([]sqstypes.ChangeMessageVisibilityBatchRequestEntry, 0, end-start)
+		byID := make(map[string]execute.Message, end-start)
 		for i, m := range msgs[start:end] {
 			if m.ReceiptHandle == "" {
 				continue
 			}
+			id := strconv.Itoa(i)
+			byID[id] = m
 			entries = append(entries, sqstypes.ChangeMessageVisibilityBatchRequestEntry{
-				Id:                aws.String(strconv.Itoa(i)),
+				Id:                aws.String(id),
 				ReceiptHandle:     aws.String(m.ReceiptHandle),
 				VisibilityTimeout: sec,
 			})
@@ -346,11 +390,28 @@ func (c *Consumer) extendBatch(ctx context.Context, msgs []execute.Message, d ti
 		if len(entries) == 0 {
 			continue
 		}
-		if _, err := c.client.ChangeMessageVisibilityBatch(ctx, &sqs.ChangeMessageVisibilityBatchInput{
+		out, err := c.client.ChangeMessageVisibilityBatch(ctx, &sqs.ChangeMessageVisibilityBatchInput{
 			QueueUrl: aws.String(c.cfg.QueueURL),
 			Entries:  entries,
-		}); err != nil {
+		})
+		if err != nil {
+			c.heartbeatFailures.Add(int64(len(entries)))
 			return fmt.Errorf("sqs change visibility batch (%d entries, %ds): %w", len(entries), sec, err)
+		}
+		if out != nil && len(out.Failed) > 0 {
+			c.heartbeatFailures.Add(int64(len(out.Failed)))
+			for _, fail := range out.Failed {
+				entryID := aws.ToString(fail.Id)
+				m := byID[entryID]
+				c.logger.Warn("visibility heartbeat partial batch failure",
+					"request_id", m.RequestID,
+					"provider", m.Provider,
+					"entry_id", entryID,
+					"code", aws.ToString(fail.Code),
+					"message", aws.ToString(fail.Message),
+					"sender_fault", fail.SenderFault,
+				)
+			}
 		}
 	}
 	return nil
@@ -408,19 +469,35 @@ func parseMessage(raw sqstypes.Message) (execute.Message, error) {
 	}, nil
 }
 
-// Ack deletes the message from SQS.
-func (c *Consumer) Ack(ctx context.Context, m execute.Message) error {
-	if m.ReceiptHandle == "" {
+// withSettledLock marks rh as settled under the owning group's mutex before calling fn,
+// preventing any concurrent heartbeat tick from overwriting Ack/Nack/Extend visibility.
+func (c *Consumer) withSettledLock(rh string, fn func() error) error {
+	if rh == "" {
 		return nil
 	}
-	_, err := c.client.DeleteMessage(ctx, &sqs.DeleteMessageInput{
-		QueueUrl:      aws.String(c.cfg.QueueURL),
-		ReceiptHandle: aws.String(m.ReceiptHandle),
-	})
-	if err != nil {
-		return fmt.Errorf("sqs delete %s: %w", m.RequestID, err)
+	if v, ok := c.groups.Load(rh); ok {
+		if gs, ok := v.(*groupHeartbeatState); ok {
+			gs.mu.Lock()
+			defer gs.mu.Unlock()
+			gs.settled[rh] = true
+			return fn()
+		}
 	}
-	return nil
+	return fn()
+}
+
+// Ack deletes the message from SQS.
+func (c *Consumer) Ack(ctx context.Context, m execute.Message) error {
+	return c.withSettledLock(m.ReceiptHandle, func() error {
+		_, err := c.client.DeleteMessage(ctx, &sqs.DeleteMessageInput{
+			QueueUrl:      aws.String(c.cfg.QueueURL),
+			ReceiptHandle: aws.String(m.ReceiptHandle),
+		})
+		if err != nil {
+			return fmt.Errorf("sqs delete %s: %w", m.RequestID, err)
+		}
+		return nil
+	})
 }
 
 // Nack releases or delays visibility of the message in SQS.
@@ -433,20 +510,24 @@ func (c *Consumer) Extend(ctx context.Context, m execute.Message, d time.Duratio
 	return c.changeVisibility(ctx, m, d)
 }
 
+// HeartbeatFailures returns the cumulative count of partial failures reported by ChangeMessageVisibilityBatch.
+func (c *Consumer) HeartbeatFailures() int64 {
+	return c.heartbeatFailures.Load()
+}
+
 func (c *Consumer) changeVisibility(ctx context.Context, m execute.Message, d time.Duration) error {
-	if m.ReceiptHandle == "" {
+	return c.withSettledLock(m.ReceiptHandle, func() error {
+		sec := durationToSQSSeconds(d)
+		_, err := c.client.ChangeMessageVisibility(ctx, &sqs.ChangeMessageVisibilityInput{
+			QueueUrl:          aws.String(c.cfg.QueueURL),
+			ReceiptHandle:     aws.String(m.ReceiptHandle),
+			VisibilityTimeout: sec,
+		})
+		if err != nil {
+			return fmt.Errorf("sqs change visibility %s (%ds): %w", m.RequestID, sec, err)
+		}
 		return nil
-	}
-	sec := durationToSQSSeconds(d)
-	_, err := c.client.ChangeMessageVisibility(ctx, &sqs.ChangeMessageVisibilityInput{
-		QueueUrl:          aws.String(c.cfg.QueueURL),
-		ReceiptHandle:     aws.String(m.ReceiptHandle),
-		VisibilityTimeout: sec,
 	})
-	if err != nil {
-		return fmt.Errorf("sqs change visibility %s (%ds): %w", m.RequestID, sec, err)
-	}
-	return nil
 }
 
 func durationToSQSSeconds(d time.Duration) int32 {

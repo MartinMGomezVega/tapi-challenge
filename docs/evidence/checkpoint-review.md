@@ -32,3 +32,34 @@
 ## 3. Regla B — Tests modificados
 - Call sites de `Execute(...)` en `execute_test.go`, `policy_adapter_test.go` y `consumer_test.go`: actualizados por cambio de firma `error` → `(HandleOutcome, error)`, sin relajar aserciones.
 - `TestWorker_LoadBenchmark_Zipf200Providers` → renombrado y separado en `BenchmarkExecuteUseCase_Overhead` + `TestWorker_LocalStack_EndToEndThroughput` por pedido explícito de revisión (registrado en `docs/decisions-log.md`).
+
+---
+
+# Ronda 2 — Ajustes finales (`fix/review-findings-2`)
+
+**Branch**: `fix/review-findings-2` (mergeada a `main` con `--no-ff`)
+**Estado**: Completada (los 2 ajustes cerrados con TDD RED → GREEN + auditoría honesta MEDIDO vs PROYECTADO).
+
+## 1. Ajustes resueltos y commits
+1. **Ajuste 2 — Race del heartbeat vs `Nack(backoff)` y fallos parciales de `extendBatch` (`f035d48`, `37c5360`)**:
+   - **RED (`f035d48`)**:
+     - `TestConsumer_HeartbeatDoesNotOverwriteNackBackoff`: el handler difiere el mensaje con `Nack(30s)` dentro de `Execute` y un tick de heartbeat ocurre inmediatamente después → fallaba con `final visibility for deferred rh-d1 = [30 1], want last value 30`.
+     - `TestConsumer_ExtendBatchCountsPartialFailures`: `ChangeMessageVisibilityBatch` devuelve 1 entrada `Failed` → fallaba con `HeartbeatFailures() = 0, want >= 1`.
+   - **GREEN (`37c5360`)**:
+     - `groupHeartbeatState` con mutex `mu` y mapa `settled` registrado por `ReceiptHandle` en `Consumer.groups`. `Ack`/`Nack`/`Extend` toman `gs.mu`, marcan `settled[rh] = true` y ejecutan la llamada SQS bajo el mismo mutex que `runGroupHeartbeat` (el cual filtra `!settled[m.ReceiptHandle]`), eliminando la carrera por construcción.
+     - `extendBatch` inspecciona `out.Failed`, incrementa `heartbeatFailures` (`atomic.Int64`, expuesto vía `HeartbeatFailures()`) y emite `slog.Warn` estructurado por cada fallo parcial.
+     - Verificado con `-count=50 -race` (**PASS**).
+2. **Ajuste 1 — SC-003, E2E Uniforme 200 proveedores, cota serial Zipf y auditoría MEDIDO vs PROYECTADO**:
+   - **`TestWorker_LocalStack_EndToEndThroughput_Uniform`** (200 proveedores uniformes × 10 msgs = 2.000 msgs, 4 workers × 16 inflight en LocalStack real):
+     - `wall = 23,484 s`, **throughput real = `85,2 req/s`** (< 120 req/s → `003/SC-003` pasa a **`⚠️ verificado por proyección`**).
+     - **`max_provider_inflight = 1`**, `global_max_inflight = 9`, **`dup_idem = 0`**.
+   - **`TestWorker_LocalStack_EndToEndThroughput` (Zipf 50 proveedores, 2.000 msgs)**:
+     - Reporta `top_provider_msgs = 522`, `top_provider_avg_ms = 61,26 ms`, `top_provider_serial_time = 31,979 s`, `wall = 32,344 s`, **`wall_over_serial_ratio = 1,011`** (+1,1 %, verificando `wall <= 1.20 * top_provider_serial_time` ✅), `throughput = 61,8 req/s`, `max_provider_inflight = 1`, `global_max_inflight = 5`, `dup_idem = 0`.
+   - **Documentación actualizada (`load-test.md`, `checkpoint-003.md`, `final-report.md`, `checkpoint-{001,002,005,006}.md`)**: separación estricta **MEDIDO** vs **PROYECTADO** (con fórmula explícita AWS `128 / 0,4207 = 304,3 req/s`) y reclasificación honesta de todos los SC verificados por cálculo/proyección/estático (`001/SC-003`, `001/SC-004`, `002/SC-002`, `003/SC-003`, `005/SC-002`, `006/SC-002`, `006/SC-003`, `006/SC-004`).
+
+## 2. Gates verificados tras Ronda 2
+- `make test` (`-short -race -cover`), `make test-full` (`-race`), `make cover`: **PASS — 92,4 %** (`domain + app`).
+- `go test -race -count=50` en `internal/adapters/sqsq` (heartbeat/Nack race, partial failures, abort on defer, sequentiality) + `-count=3` en heartbeat multi-segundo: **PASS**.
+- LocalStack E2E: `TestWorker_LocalStack_EndToEndThroughput` (Zipf, `ratio=1.011`) + `TestWorker_LocalStack_EndToEndThroughput_Uniform` (`85.2 req/s`, `max_provider_inflight=1`, `dup_idem=0`) + `make it`: **PASS**.
+- `gofmt`, `go vet -tags=integration`, `golangci-lint`, `staticcheck`, `govulncheck`, `actionlint`, `terraform fmt -check`: **PASS / 0 issues / 0 vulnerabilidades**.
+
