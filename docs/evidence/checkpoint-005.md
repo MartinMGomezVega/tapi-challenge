@@ -13,11 +13,11 @@
   - `dynamo.ExecutionsRepo.BatchGet` (chunks de 100 con reintento de `UnprocessedKeys`) y `ResetStale` condicional (`NOT terminal AND updated_at <= cutoff`).
   - `cmd/reconciler` (`--date`, `--redispatch`, `--parallelism`, `--check-capacity` ejecutando `app/capacity.Check` para `001-T025`) + `build/reconciler.Dockerfile` + `deploy/athena/reports_table.sql`.
   - `TestReconcile_LocalStack_FaultInjectionTo100PercentCoverage`: E2E en LocalStack con fault injection (missing + stuck > 2h) → re-despacho → 2.ª corrida idempotente (0 re-despachos) → worker completa el 100 % → cobertura **100 %** + JSON/CSV en S3.
-  - `BenchmarkReconcile1M` + proyección 1M / 100M en [reconciler-bench.md](file:///Users/martingomezvega/challenge/tapi-challenge/docs/evidence/reconciler-bench.md).
+  - `BenchmarkReconcile1M` + proyección 1M / 100M en [reconciler-bench.md](reconciler-bench.md).
 - **Fase 3 & 4 — Alarmas, 7 Runbooks y Dashboard (`005-T018`..`T021`)**:
   - `deploy/terraform/modules/observability/` (7 alarmas + SNS cifrado KMS + CloudWatch Dashboard + tabla Glue/Athena).
   - 7/7 runbooks en `docs/runbooks/`: `dispatch-lag.md`, `queue-age.md`, `dlq.md`, `coverage-low.md`, `auth-errors.md`, `lambda-quota.md`, `provider-capacity.md`.
-  - [observability-dashboard.md](file:///Users/martingomezvega/challenge/tapi-challenge/docs/evidence/observability-dashboard.md).
+  - [observability-dashboard.md](observability-dashboard.md).
 
 ## 2. Evidencia de gates y cobertura
 - `make test` (`-short -race -cover`) & `make test-full` (`-race`): **PASS**
@@ -39,7 +39,7 @@
 | SC | Criterio | Evidencia | Estado |
 |---|---|---|---|
 | SC-001 | `DailyCoverage ≥ 99,9 %` con fault injection; 100 % tras re-despacho | `TestReconcile_LocalStack_FaultInjectionTo100PercentCoverage`: 10 missing + 5 stuck re-despachados → **100,0 %** cobertura | ✅ |
-| SC-002 | Reconciler procesa 1M en < 10 min y 100M en < 2 h | `BenchmarkReconcile1M`: 235 ms CPU; proyección I/O DynamoDB: < 30 s (1M) y ~15 min worst-case (100M) en [reconciler-bench.md](file:///Users/martingomezvega/challenge/tapi-challenge/docs/evidence/reconciler-bench.md) | ✅ |
+| SC-002 | Reconciler procesa 1M en < 10 min y 100M en < 2 h | `BenchmarkReconcile1M`: 235 ms CPU; proyección I/O DynamoDB: < 30 s (1M) y ~15 min worst-case (100M) en [reconciler-bench.md](reconciler-bench.md) | ✅ |
 | SC-003 | Cualquier ejecución rastreable punta a punta con `trace_id` | W3C `traceparent` OTel generado/propagado en SQS `MessageAttributes` y HTTP `traceparent`, verificado en `TestTraceParent_RoundTrip` y golden log `trace_id` | ✅ |
 
 ## 4. Desvíos y tests modificados (Regla B)

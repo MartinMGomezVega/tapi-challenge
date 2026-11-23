@@ -1,0 +1,332 @@
+openapi: 3.1.0
+info:
+  title: Tapi Scheduled Provider Queries — Contratos HTTP
+  version: 1.0.0
+  summary: Contrato que el worker consume de la API interna, health checks y mock de pruebas.
+  description: |
+    **Importante:** este sistema **no expone una API pública propia**. Es un proceso programado
+    (`dispatcher-svc`, `worker-svc` y `reconciler-job`) que ejecuta una consulta diaria por registro
+    contra la **API interna** de Tapi (API Gateway privado → 2 Lambdas, misma cuenta y región).
+
+    Este documento describe:
+
+    1. **API interna — contrato consumido.** Qué envía el worker en cada consulta y cómo interpreta
+       cada respuesta: cuáles se reintentan y cuáles no (requisito de manejo de errores del enunciado).
+       Es un **supuesto de integración**: la API real es de Tapi y la ruta concreta de cada consulta
+       sale del campo `endpoint` de cada registro.
+    2. **Health checks** de `dispatcher-svc` y `worker-svc` (usados por ECS).
+    3. **Mock API** que reemplaza a la API interna en el entorno local y en los tests (`test/mockapi`).
+       Mide la concurrencia por proveedor y las `Idempotency-Key` duplicadas, que es la evidencia de los invariantes.
+
+    Además, en `components.schemas` se documenta el formato del **mensaje SQS FIFO** que el dispatcher
+    envía al worker y el **registro de ejecución** que se guarda en DynamoDB.
+
+    | Invariante | Cómo se garantiza |
+    |---|---|
+    | ≤ 1 llamada en vuelo por proveedor | SQS FIFO con `MessageGroupId = provider` + lease en DynamoDB |
+    | 1 ejecución por registro y día | Clave `request_id#run_date` en 4 capas (dedup SQS, escrituras condicionales, lease, `Idempotency-Key`) |
+    | Ningún fallo se pierde | Reintentos con backoff → DLQ → `FAILED_EXHAUSTED` + reconciliación diaria |
+
+    Arquitectura completa y ADRs: [docs/architecture.md](https://github.com/MartinMGomezVega/tapi-challenge/blob/main/docs/architecture.md)
+  contact:
+    name: Martín Gómez Vega
+    url: https://github.com/MartinMGomezVega/tapi-challenge
+externalDocs:
+  description: Repositorio del challenge
+  url: https://github.com/MartinMGomezVega/tapi-challenge
+
+tags:
+  - name: API interna (contrato consumido)
+    description: |
+      Llamada que hace `worker-svc` por cada registro, una vez por día. Timeout de 25 s por llamada
+      (por debajo de los 29 s de API Gateway, para contemplar cold starts de las 2 Lambdas encadenadas).
+      Acceso privado por VPC endpoint `execute-api`, firmado con AWS SigV4.
+  - name: Health checks
+    description: Endpoints de salud de los servicios ECS.
+  - name: Mock API (entorno local y tests)
+    description: |
+      Doble de prueba de la API interna (`cmd/mockapi`, puerto 8090 en `docker-compose`).
+      Permite inyectar latencia y errores por proveedor, y expone métricas para verificar los invariantes.
+
+paths:
+  /providers/{provider}/query:
+    post:
+      tags: [API interna (contrato consumido)]
+      operationId: queryProvider
+      summary: Consulta diaria de un registro a un proveedor
+      description: |
+        **Ruta ilustrativa.** La ruta real es `PROVIDER_API_BASE_URL + request.endpoint`, y el método es
+        `request.method` (por defecto `POST`). El body es exactamente el `body` JSON del registro.
+
+        **Clasificación de la respuesta** (`internal/domain/errclass.go`, configurable):
+
+        | Respuesta | Clase | ¿Reintenta? | Resultado |
+        |---|---|---|---|
+        | 2xx con JSON válido | — | — | `SUCCEEDED` (body guardado; > 350 KB → S3) |
+        | 2xx con body inválido | `INVALID_RESPONSE` | 1 vez | luego `FAILED_PERMANENT` |
+        | 408, timeout, conexión reseteada | `TRANSIENT_NETWORK` | ✅ | backoff |
+        | 429 o header `X-Amzn-ErrorType` con throttling | `THROTTLED` | ✅ | respeta `Retry-After` |
+        | 500, 502, 503, 504 | `TRANSIENT_SERVER` | ✅ | backoff |
+        | 409 (misma `Idempotency-Key`) | `ALREADY_PROCESSED` | ❌ | se trata como éxito |
+        | 400, 422 | `INVALID_REQUEST` | ❌ | `FAILED_PERMANENT` |
+        | 401, 403 | `AUTH` | ❌ | `FAILED_PERMANENT` + alarma P1 |
+        | 404 | `NOT_FOUND` | ❌ | `FAILED_PERMANENT` |
+        | Otro | `UNKNOWN` | ✅ (con límite) | backoff |
+
+        **Política de reintentos:** hasta 2 reintentos rápidos en proceso (sólo errores transitorios de < 1 s);
+        después, backoff exponencial con jitter ±20 % entre 30 s y 15 min vía `ChangeMessageVisibility`
+        (el grupo del proveedor queda bloqueado mientras tanto, sin afectar a los demás). A la 6.ª entrega
+        → DLQ y `FAILED_EXHAUSTED`. Circuit breaker por proveedor: se abre con ≥ 50 % de errores en los
+        últimos 20 intentos, durante 60 s.
+      security:
+        - awsSigV4: []
+      servers:
+        - url: https://{apiId}-{vpceId}.execute-api.{region}.amazonaws.com/{stage}
+          description: API Gateway privado (acceso sólo desde la VPC por VPC endpoint)
+          variables:
+            apiId: { default: abc123 }
+            vpceId: { default: vpce-0example }
+            region: { default: us-east-1 }
+            stage: { default: prod }
+        - url: http://localhost:8090
+          description: Mock API local (docker-compose)
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          description: Proveedor del registro (ilustrativo; en la ruta real puede no aparecer).
+          schema: { type: string, example: edenor }
+        - name: X-Provider
+          in: header
+          required: true
+          description: Proveedor del registro. Lo envía siempre el worker.
+          schema: { type: string, example: edenor }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: |
+            `request_id#run_date`. La misma consulta del mismo día siempre lleva la misma clave, así
+            la API puede deduplicar si el worker se cae después de llamar y antes de guardar (ADR-005).
+          schema: { type: string, example: "adh_8f3a2c#2026-11-23" }
+        - name: traceparent
+          in: header
+          required: false
+          description: Contexto de traza W3C, propagado desde el dispatcher a través de SQS.
+          schema: { type: string, example: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01 }
+      requestBody:
+        required: true
+        description: El `body` JSON del registro, enviado sin modificaciones.
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+            example:
+              client_reference: "12345678"
+              company_code: EDN-AR
+      responses:
+        "200":
+          description: Éxito. El body es opaco para el sistema; se guarda tal cual. Ejemplo ilustrativo de consulta de deuda.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProviderQueryResponse" }
+        "400": { $ref: "#/components/responses/NoRetryInvalidRequest" }
+        "401": { $ref: "#/components/responses/NoRetryAuth" }
+        "403": { $ref: "#/components/responses/NoRetryAuth" }
+        "404":
+          description: "`NOT_FOUND` — no se reintenta → `FAILED_PERMANENT`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProviderError" }
+        "408": { $ref: "#/components/responses/RetryTransient" }
+        "409":
+          description: "`ALREADY_PROCESSED` — la API ya procesó esa `Idempotency-Key`. Se trata como éxito."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProviderError" }
+        "422": { $ref: "#/components/responses/NoRetryInvalidRequest" }
+        "429":
+          description: "`THROTTLED` — se reintenta respetando `Retry-After` (acotado a 15 min)."
+          headers:
+            Retry-After:
+              description: Segundos o fecha HTTP.
+              schema: { type: string, example: "30" }
+            X-Amzn-ErrorType:
+              description: Si contiene `TooManyRequests` o `Throttl…`, se clasifica como throttling aunque el status sea 5xx.
+              schema: { type: string, example: TooManyRequestsException }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProviderError" }
+        "500": { $ref: "#/components/responses/RetryTransient" }
+        "502": { $ref: "#/components/responses/RetryTransient" }
+        "503": { $ref: "#/components/responses/RetryTransient" }
+        "504": { $ref: "#/components/responses/RetryTransient" }
+
+  /healthz:
+    get:
+      tags: [Health checks]
+      operationId: healthz
+      summary: Health check de dispatcher-svc, worker-svc o mock API
+      description: |
+        Mismo path en los tres procesos, en puertos distintos. Responde 200 mientras el proceso está vivo.
+        `dispatcher-svc` devuelve JSON; `worker-svc` y la mock API devuelven `ok` en texto plano.
+      servers:
+        - url: http://localhost:8080
+          description: dispatcher-svc (HEALTH_ADDR, default :8080)
+        - url: http://localhost:8081
+          description: worker-svc (HEALTH_ADDR, default :8081)
+        - url: http://localhost:8090
+          description: Mock API
+      responses:
+        "200":
+          description: Proceso vivo.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+            text/plain:
+              schema: { type: string, example: ok }
+
+  /stats:
+    get:
+      tags: [Mock API (entorno local y tests)]
+      operationId: mockStats
+      summary: Métricas observadas por la mock API
+      description: |
+        Evidencia de los invariantes, medida **del lado de la API** y no por el código bajo prueba:
+        `max_provider_inflight` debe ser 1 y `duplicate_idem_keys` debe ser 0.
+      servers:
+        - url: http://localhost:8090
+          description: Mock API local
+      responses:
+        "200":
+          description: Snapshot de métricas.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MockStats" }
+
+  /reset:
+    post:
+      tags: [Mock API (entorno local y tests)]
+      operationId: mockReset
+      summary: Reinicia las métricas de la mock API
+      servers:
+        - url: http://localhost:8090
+          description: Mock API local
+      responses:
+        "204":
+          description: Métricas y claves de idempotencia vistas reiniciadas.
+
+components:
+  securitySchemes:
+    awsSigV4:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: |
+        Firma **AWS Signature Version 4** (servicio `execute-api`) con el rol IAM de la task de `worker-svc`.
+        La resource policy de API Gateway sólo acepta tráfico desde el VPC endpoint (`aws:SourceVpce`).
+      x-amazon-apigateway-authtype: awsSigv4
+
+  responses:
+    RetryTransient:
+      description: "`TRANSIENT_SERVER` / `TRANSIENT_NETWORK` — se reintenta con backoff exponencial y jitter."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ProviderError" }
+    NoRetryInvalidRequest:
+      description: "`INVALID_REQUEST` — no se reintenta → `FAILED_PERMANENT`."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ProviderError" }
+    NoRetryAuth:
+      description: "`AUTH` — no se reintenta → `FAILED_PERMANENT` + alarma P1 (problema de configuración)."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ProviderError" }
+
+  schemas:
+    ProviderQueryResponse:
+      type: object
+      description: Respuesta opaca. Ejemplo ilustrativo bajo el supuesto de consulta de deuda/facturas.
+      additionalProperties: true
+      example:
+        has_debt: true
+        bills:
+          - bill_id: F-0091
+            amount: 18450.75
+            currency: ARS
+            due_date: "2026-11-28"
+
+    ProviderError:
+      type: object
+      additionalProperties: true
+      properties:
+        error: { type: string, example: upstream_unavailable }
+
+    JobMessage:
+      type: object
+      description: |
+        **Mensaje SQS FIFO** (`tapi-jobs.fifo`) que el dispatcher envía al worker. No es un endpoint HTTP.
+        Atributos de SQS: `MessageGroupId = provider` (exclusividad por proveedor) y
+        `MessageDeduplicationId = request_id#run_date` (deduplicación). `traceparent` también viaja como MessageAttribute.
+        El worker relee `endpoint`, `method` y `body` del catálogo para usar siempre la versión vigente.
+      required: [request_id, run_date, provider, slot, dispatched_at]
+      properties:
+        request_id: { type: string, example: adh_8f3a2c }
+        run_date: { type: string, format: date, example: "2026-11-23" }
+        provider: { type: string, example: edenor }
+        slot:
+          type: integer
+          minimum: 0
+          maximum: 1439
+          description: Minuto del día asignado al registro.
+          example: 862
+        dispatched_at: { type: string, format: date-time }
+        trace_context: { type: string }
+
+    Execution:
+      type: object
+      description: |
+        **Ítem de la tabla DynamoDB `executions`** (PK `request_id`, SK `run_date`). Toda transición es una
+        escritura condicional sobre el estado previo.
+      required: [request_id, run_date, provider, status, attempts]
+      properties:
+        request_id: { type: string }
+        run_date: { type: string, format: date }
+        provider: { type: string }
+        status:
+          type: string
+          enum: [PENDING, ENQUEUED, IN_PROGRESS, RETRYING, SUCCEEDED, FAILED_PERMANENT, FAILED_EXHAUSTED, SKIPPED]
+        attempts: { type: integer, minimum: 0 }
+        lease_owner: { type: string }
+        lease_expires_at: { type: integer, description: Epoch en segundos. }
+        http_status: { type: integer }
+        response_body: { type: string, description: Respuesta inline (≤ 350 KB). }
+        response_s3_key: { type: string, description: "Si la respuesta supera 350 KB: results/run_date=D/provider=P/id.json" }
+        latency_ms: { type: integer }
+        error_class:
+          type: string
+          enum: [TRANSIENT_NETWORK, TRANSIENT_SERVER, THROTTLED, INVALID_REQUEST, AUTH, NOT_FOUND, ALREADY_PROCESSED, INVALID_RESPONSE, UNKNOWN]
+        error_message: { type: string, description: Sanitizado (sin PII ni tokens) y truncado a 1 KB. }
+        completed_at: { type: string, format: date-time }
+        ttl: { type: integer, description: Epoch de expiración (90 días). }
+
+    MockStats:
+      type: object
+      properties:
+        total_calls: { type: integer, example: 2000 }
+        duplicate_idem_keys: { type: integer, example: 0, description: Debe ser 0. }
+        global_max_inflight: { type: integer, example: 9 }
+        max_provider_inflight: { type: integer, example: 1, description: Debe ser 1. }
+        providers:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              calls: { type: integer }
+              inflight: { type: integer }
+              max_inflight: { type: integer }
+              errors: { type: integer }

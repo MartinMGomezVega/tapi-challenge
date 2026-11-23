@@ -17,10 +17,10 @@
      - `wall = 26,01 s`, **throughput E2E real = 76,9 req/s** (`top_provider_msgs = 522`)
      - **`max_provider_inflight = 1`** (medido por `mockapi`, sin serialización en el test)
      - `global_max_inflight = 9`, **`dup_idem = 0`**
-   - Actualizados [load-test.md](file:///Users/martingomezvega/challenge/tapi-challenge/docs/evidence/load-test.md), [checkpoint-003.md](file:///Users/martingomezvega/challenge/tapi-challenge/docs/evidence/checkpoint-003.md) y [final-report.md](file:///Users/martingomezvega/challenge/tapi-challenge/docs/evidence/final-report.md) explicando cuantitativamente el techo de LocalStack/laptop vs AWS.
+   - Actualizados [load-test.md](load-test.md), [checkpoint-003.md](checkpoint-003.md) y [final-report.md](final-report.md) explicando cuantitativamente el techo de LocalStack/laptop vs AWS.
 5. **Hallazgo 4 — Transparencia de Checkov skipped**:
    - Eliminado el flag redundante `skip_check` en `.github/workflows/ci.yml` (sólo anotaciones inline justificadas).
-   - Documentado explícitamente en [checkpoint-006.md](file:///Users/martingomezvega/challenge/tapi-challenge/docs/evidence/checkpoint-006.md) y [final-report.md](file:///Users/martingomezvega/challenge/tapi-challenge/docs/evidence/final-report.md): **Checkov 306 passed / 0 failed / 6 skipped (justificados)** con la lista completa y razón de cada uno (`CKV_AWS_144`, `CKV_AWS_18`, `CKV2_AWS_62`, `CKV_AWS_109`, `CKV_AWS_111`, `CKV_AWS_356`).
+   - Documentado explícitamente en [checkpoint-006.md](checkpoint-006.md) y [final-report.md](final-report.md): **Checkov 306 passed / 0 failed / 6 skipped (justificados)** con la lista completa y razón de cada uno (`CKV_AWS_144`, `CKV_AWS_18`, `CKV2_AWS_62`, `CKV_AWS_109`, `CKV_AWS_111`, `CKV_AWS_356`).
 
 ## 2. Gates verificados tras las correcciones
 - `make test` (`-short -race -cover`), `make test-full` (`-race`), `make cover`: **PASS — 92,4 %** (`domain + app`)
