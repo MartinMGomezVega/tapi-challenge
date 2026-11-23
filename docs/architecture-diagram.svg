@@ -1,117 +1,182 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="580" viewBox="0 0 1120 580" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 960" font-family="Inter, Helvetica, Arial, sans-serif" xmlns:c2pa="http://c2pa.org/manifest">
   <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M 0 1 L 10 5 L 0 9 z" fill="#334155"/>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#334155"/>
+    </marker>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#b45309"/>
     </marker>
     <style>
-      .title { font-size: 18px; font-weight: 700; fill: #0f172a; }
-      .sub { font-size: 12px; fill: #475569; }
-      .box { rx: 10; ry: 10; stroke-width: 1.5; }
-      .lbl { font-size: 13px; font-weight: 600; fill: #0f172a; }
-      .desc { font-size: 11px; fill: #334155; }
-      .zone { fill: #f8fafc; stroke: #94a3b8; stroke-dasharray: 6 4; rx: 12; }
-      .edge { stroke: #334155; stroke-width: 1.6; fill: none; marker-end: url(#arrow); }
-      .elbl { font-size: 10px; fill: #475569; font-weight: 500; }
+      .t{font-size:17px;font-weight:700;fill:#0f172a}
+      .d{font-size:13.5px;fill:#334155}
+      .l{font-size:12.5px;fill:#334155}
+      .lr{font-size:12.5px;fill:#b45309}
+      .sec{font-size:14px;font-weight:600;fill:#475569}
+      .ln{stroke:#334155;stroke-width:1.6;fill:none}
+      .lnr{stroke:#b45309;stroke-width:1.6;fill:none;stroke-dasharray:6 4}
+      .bg{fill:#ffffff}
     </style>
   </defs>
+  <rect width="1600" height="960" fill="#ffffff"/>
 
-  <rect width="1120" height="580" fill="#ffffff"/>
-  <text x="28" y="34" class="title">Tapi Scheduled Provider Queries — AWS Private Architecture (Single Account &amp; Region, No NAT)</text>
-  <text x="28" y="54" class="sub">Invariants: 1 inflight/provider (SQS FIFO + Lease) · 1 exec/request/day (4-layer idempotency) · Uniform 1440-slot distribution · Lambda budget k×t ≤ Q/2</text>
+  <!-- Title -->
+  <text x="40" y="42" font-size="24" font-weight="700" fill="#0f172a">Tapi — Consultas diarias programadas a proveedores · AWS (1 cuenta, 1 región)</text>
+  <text x="40" y="70" font-size="15" fill="#475569">Invariantes: ≤ 1 llamada en vuelo por proveedor · 1 ejecución por registro y día (clave request_id#run_date) · carga uniforme en 1.440 slots (1 por minuto)</text>
 
-  <!-- Private VPC Zone -->
-  <rect x="24" y="72" width="1072" height="486" class="zone"/>
-  <text x="40" y="96" class="lbl">Private VPC (3 AZs, Private Subnets Only · Zero NAT · Gateway &amp; Interface VPC Endpoints · KMS CMK)</text>
+  <!-- Left: data -->
+  <text x="40" y="112" class="sec">Datos — DynamoDB (vía VPC endpoint)</text>
 
-  <!-- DynamoDB Data Layer -->
-  <rect x="52" y="122" width="210" height="86" class="box" fill="#eff6ff" stroke="#2563eb"/>
-  <text x="68" y="146" class="lbl">DynamoDB: requests</text>
-  <text x="68" y="164" class="desc">PK: id · GSI gsi_slot_shard</text>
-  <text x="68" y="180" class="desc">GSI gsi_provider (streaming backfill)</text>
-  <text x="68" y="196" class="desc">On-Demand · PITR · KMS</text>
+  <rect x="40" y="128" width="330" height="112" rx="10" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
+  <text x="58" y="156" class="t">DynamoDB · coordination</text>
+  <text x="58" y="180" class="d">Lease de líder + fencing token</text>
+  <text x="58" y="200" class="d">Watermark (run_date, último slot)</text>
+  <text x="58" y="220" class="d">Registro de proveedores + histograma</text>
 
-  <rect x="52" y="232" width="210" height="86" class="box" fill="#eff6ff" stroke="#2563eb"/>
-  <text x="68" y="256" class="lbl">DynamoDB: coordination</text>
-  <text x="68" y="274" class="desc">Leader Lease + Fencing Version</text>
-  <text x="68" y="290" class="desc">Watermark (run_date, last_slot)</text>
-  <text x="68" y="306" class="desc">Provider Histograms &amp; Checkpoints</text>
+  <rect x="40" y="268" width="330" height="122" rx="10" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
+  <text x="58" y="296" class="t">DynamoDB · requests (catálogo)</text>
+  <text x="58" y="320" class="d">id, provider, endpoint, body, slot, shard</text>
+  <text x="58" y="340" class="d">GSI slot#shard → despacho por minuto</text>
+  <text x="58" y="360" class="d">GSI provider → backfill en streaming</text>
+  <text x="58" y="380" class="d">Cero Scan · on-demand · PITR · KMS</text>
 
-  <rect x="52" y="342" width="210" height="92" class="box" fill="#eff6ff" stroke="#2563eb"/>
-  <text x="68" y="366" class="lbl">DynamoDB: executions</text>
-  <text x="68" y="384" class="desc">PK: request_id · SK: run_date</text>
-  <text x="68" y="400" class="desc">GSI gsi_run_date_status · TTL 90d</text>
-  <text x="68" y="416" class="desc">Conditional Acquire / Lease / Result</text>
+  <rect x="40" y="418" width="330" height="132" rx="10" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
+  <text x="58" y="446" class="t">DynamoDB · executions</text>
+  <text x="58" y="470" class="d">PK request_id · SK run_date</text>
+  <text x="58" y="490" class="d">PENDING → ENQUEUED → IN_PROGRESS →</text>
+  <text x="58" y="510" class="d">SUCCEEDED | FAILED_* | SKIPPED</text>
+  <text x="58" y="530" class="d">Escrituras condicionales · lease · TTL 90 d</text>
 
-  <rect x="52" y="454" width="210" height="76" class="box" fill="#ecfdf5" stroke="#059669"/>
-  <text x="68" y="478" class="lbl">S3: tapi-results (KMS + TLS)</text>
-  <text x="68" y="496" class="desc">results/ (&gt;350 KB payloads)</text>
-  <text x="68" y="512" class="desc">reports/ JSON+CSV (Athena/Glue)</text>
+  <!-- VPC -->
+  <rect x="470" y="96" width="440" height="664" rx="14" fill="#f8fafc" stroke="#94a3b8" stroke-width="2" stroke-dasharray="8 6"/>
+  <text x="490" y="122" class="sec">VPC privada · 3 AZ · sin NAT · ECS Fargate ARM64</text>
 
-  <!-- Dispatcher -->
-  <rect x="328" y="140" width="210" height="114" class="box" fill="#fefce8" stroke="#ca8a04"/>
-  <text x="344" y="164" class="lbl">ECS Fargate: dispatcher (×2)</text>
-  <text x="344" y="182" class="desc">ARM64 · Leader Election (30s lease)</text>
-  <text x="344" y="198" class="desc">Minute ticker + catch-up + orphans</text>
-  <text x="344" y="214" class="desc">Parallel shard queries (errgroup)</text>
-  <text x="344" y="230" class="desc">Circuit Breaker + Rollback</text>
+  <rect x="515" y="140" width="350" height="160" rx="10" fill="#fffbeb" stroke="#d97706" stroke-width="2"/>
+  <text x="533" y="168" class="t">dispatcher-svc (2 réplicas, 1 líder)</text>
+  <text x="533" y="192" class="d">Ticker cada 1 min + catch-up por watermark</text>
+  <text x="533" y="212" class="d">Consulta el slot del minuto (shards en paralelo)</text>
+  <text x="533" y="232" class="d">Crea PENDING condicional → encola</text>
+  <text x="533" y="252" class="d">Re-envía PENDING huérfanos (&gt; 5 min)</text>
+  <text x="533" y="272" class="d">Fencing: un ex-líder no avanza el watermark</text>
 
-  <!-- SQS FIFO + DLQ -->
-  <rect x="598" y="140" width="220" height="92" class="box" fill="#fdf2f8" stroke="#db2777"/>
-  <text x="614" y="164" class="lbl">SQS FIFO: tapi-jobs.fifo</text>
-  <text x="614" y="182" class="desc">MessageGroupId = provider</text>
-  <text x="614" y="198" class="desc">DedupId = request_id#run_date</text>
-  <text x="614" y="214" class="desc">High-Throughput · VT 60s · KMS</text>
+  <rect x="515" y="340" width="350" height="200" rx="10" fill="#fffbeb" stroke="#d97706" stroke-width="2"/>
+  <text x="533" y="368" class="t">worker-svc (autoscaling por backlog)</text>
+  <text x="533" y="392" class="d">N tasks × k goroutines (semáforo)</text>
+  <text x="533" y="412" class="d">Batch agrupado por proveedor → en serie</text>
+  <text x="533" y="432" class="d">Heartbeat de visibilidad de todo el grupo</text>
+  <text x="533" y="452" class="d">Clasifica error → reintento / fallo final</text>
+  <text x="533" y="472" class="d">Backoff exponencial + jitter · breaker</text>
+  <text x="533" y="492" class="d">Presupuesto: k × tasks ≤ cuota Lambda / 2</text>
+  <text x="533" y="512" class="d">SIGTERM: termina en vuelo, libera el resto</text>
 
-  <rect x="598" y="256" width="220" height="68" class="box" fill="#fef2f2" stroke="#dc2626"/>
-  <text x="614" y="280" class="lbl">SQS FIFO DLQ (maxReceive=6)</text>
-  <text x="614" y="298" class="desc">FAILED_EXHAUSTED · cmd/redrive</text>
-  <text x="614" y="314" class="desc">Alarm &gt; 0 → Runbook dlq.md</text>
+  <rect x="515" y="580" width="350" height="150" rx="10" fill="#f0f9ff" stroke="#0284c7" stroke-width="2"/>
+  <text x="533" y="608" class="t">reconciler-job (diario, 00:30)</text>
+  <text x="533" y="632" class="d">Recorre requests por slot (sin Scan)</text>
+  <text x="533" y="652" class="d">BatchGet de executions del día anterior</text>
+  <text x="533" y="672" class="d">Re-despacha faltantes / atascados</text>
+  <text x="533" y="692" class="d">Cobertura diaria + capacidad por proveedor</text>
+  <text x="533" y="712" class="d">Publica reporte y métricas</text>
 
-  <!-- Worker -->
-  <rect x="598" y="352" width="220" height="126" class="box" fill="#fefce8" stroke="#ca8a04"/>
-  <text x="614" y="376" class="lbl">ECS Fargate: worker (Autoscale)</text>
-  <text x="614" y="394" class="desc">ARM64 · Pre-acquired semaphore k</text>
-  <text x="614" y="410" class="desc">Sequential per MessageGroupId</text>
-  <text x="614" y="426" class="desc">RetryPolicy + ProviderBreaker</text>
-  <text x="614" y="442" class="desc">Visibility heartbeat VT/2 · SIGTERM</text>
-  <text x="614" y="458" class="desc">k × MAX_TASKS ≤ LAMBDA_BUDGET/2</text>
+  <!-- Scheduler -->
+  <rect x="545" y="820" width="290" height="70" rx="10" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="563" y="848" class="t">EventBridge Scheduler</text>
+  <text x="563" y="872" class="d">cron diario → ECS RunTask</text>
 
-  <!-- Private Internal API Gateway -->
-  <rect x="876" y="352" width="196" height="126" class="box" fill="#f3e8ff" stroke="#7c3aed"/>
-  <text x="892" y="376" class="lbl">Internal API Gateway</text>
-  <text x="892" y="394" class="desc">Private VPCE (execute-api)</text>
-  <text x="892" y="410" class="desc">SigV4 + aws:SourceVpce</text>
-  <text x="892" y="426" class="desc">Idempotency-Key + traceparent</text>
-  <text x="892" y="442" class="desc">2× Lambdas per call (C3)</text>
-  <text x="892" y="458" class="desc">Timeout 25s (&lt; APIGW 29s)</text>
+  <!-- Right: messaging -->
+  <text x="1000" y="112" class="sec">Mensajería</text>
+  <rect x="1000" y="128" width="320" height="132" rx="10" fill="#fdf2f8" stroke="#db2777" stroke-width="2"/>
+  <text x="1018" y="156" class="t">SQS FIFO · tapi-jobs.fifo</text>
+  <text x="1018" y="180" class="d">MessageGroupId = provider</text>
+  <text x="1018" y="200" class="d">→ nunca 2 mensajes de un proveedor</text>
+  <text x="1018" y="220" class="d">    en vuelo a la vez</text>
+  <text x="1018" y="240" class="d">DedupId = request_id#run_date</text>
 
-  <!-- Reconciler + Observability -->
-  <rect x="328" y="352" width="210" height="96" class="box" fill="#f0f9ff" stroke="#0284c7"/>
-  <text x="344" y="376" class="lbl">ECS Task: reconciler (00:30)</text>
-  <text x="344" y="394" class="desc">EventBridge Scheduler daily</text>
-  <text x="344" y="410" class="desc">1440×S GSI + BatchGetItem</text>
-  <text x="344" y="426" class="desc">Idempotent re-dispatch + Capacity</text>
+  <rect x="1000" y="290" width="320" height="92" rx="10" fill="#fef2f2" stroke="#dc2626" stroke-width="2"/>
+  <text x="1018" y="318" class="t">SQS FIFO · DLQ</text>
+  <text x="1018" y="342" class="d">Reintentos agotados → FAILED_EXHAUSTED</text>
+  <text x="1018" y="362" class="d">Alarma &gt; 0 · cmd/redrive</text>
 
-  <rect x="876" y="140" width="196" height="114" class="box" fill="#f1f5f9" stroke="#475569"/>
-  <text x="892" y="164" class="lbl">Observability &amp; Alerts</text>
-  <text x="892" y="182" class="desc">slog JSON (no PII) · OTel/X-Ray</text>
-  <text x="892" y="198" class="desc">CloudWatch EMF Metrics</text>
-  <text x="892" y="214" class="desc">7 Alarms + SNS + Dashboard</text>
-  <text x="892" y="230" class="desc">7 Runbooks (docs/runbooks/)</text>
+  <!-- Internal API -->
+  <rect x="1360" y="400" width="210" height="236" rx="12" fill="#faf5ff" stroke="#7c3aed" stroke-width="2"/>
+  <text x="1376" y="426" class="t">API interna</text>
+  <text x="1376" y="446" class="l">misma cuenta y región</text>
+  <rect x="1378" y="460" width="174" height="40" rx="6" fill="#ffffff" stroke="#7c3aed"/>
+  <text x="1390" y="485" class="d">API Gateway privado</text>
+  <rect x="1378" y="522" width="174" height="34" rx="6" fill="#ffffff" stroke="#7c3aed"/>
+  <text x="1390" y="544" class="d">Lambda A</text>
+  <rect x="1378" y="578" width="174" height="34" rx="6" fill="#ffffff" stroke="#7c3aed"/>
+  <text x="1390" y="600" class="d">Lambda B</text>
+  <path class="ln" d="M1465,500 L1465,522" marker-end="url(#a)"/>
+  <path class="ln" d="M1465,556 L1465,578" marker-end="url(#a)"/>
+  <text x="1360" y="660" class="l">2 lambdas por consulta: comparten</text>
+  <text x="1360" y="678" class="l">la cuota de concurrencia de la cuenta</text>
 
-  <!-- Arrows -->
-  <path d="M 262 165 L 328 175" class="edge"/>
-  <path d="M 262 270 L 328 220" class="edge"/>
-  <path d="M 390 254 L 262 365" class="edge"/>
-  <path d="M 538 186 L 598 186" class="edge"/>
-  <text x="546" y="178" class="elbl">Batch 10</text>
-  <path d="M 708 232 L 708 256" class="edge"/>
-  <path d="M 708 324 L 708 352" class="edge"/>
-  <path d="M 818 415 L 876 415" class="edge"/>
-  <text x="824" y="407" class="elbl">SigV4</text>
-  <path d="M 598 415 L 558 415 L 558 485 L 262 485" class="edge"/>
-  <text x="370" y="478" class="elbl">&gt;350 KB blobs / S3 reports</text>
-  <path d="M 598 390 L 558 390 L 558 340 L 262 390" class="edge"/>
-  <path d="M 328 395 L 262 395" class="edge"/>
-  <path d="M 433 352 L 598 205" class="edge"/>
-</svg>
+  <rect x="1000" y="540" width="320" height="112" rx="10" fill="#ecfdf5" stroke="#059669" stroke-width="2"/>
+  <text x="1018" y="568" class="t">S3 · tapi-results</text>
+  <text x="1018" y="592" class="d">results/ — respuestas &gt; 350 KB</text>
+  <text x="1018" y="612" class="d">reports/ — reporte diario JSON/CSV</text>
+  <text x="1018" y="632" class="d">Consultable con Athena · KMS · TLS</text>
+
+  <!-- Observability -->
+  <rect x="1000" y="700" width="320" height="120" rx="10" fill="#f1f5f9" stroke="#475569" stroke-width="2"/>
+  <text x="1018" y="728" class="t">CloudWatch · X-Ray</text>
+  <text x="1018" y="752" class="d">Logs JSON sin PII · métricas EMF</text>
+  <text x="1018" y="772" class="d">Trazas por request (traceparent)</text>
+  <text x="1018" y="792" class="d">7 alarmas + SNS + runbooks</text>
+  <text x="1018" y="812" class="l">(reciben de los 3 servicios)</text>
+
+  <!-- Dispatcher arrows -->
+  <path class="ln" d="M515,184 L372,184" marker-end="url(#a)"/>
+  <rect x="388" y="163" width="125" height="18" fill="#ffffff" opacity="0.92"/>
+  <text x="392" y="176" class="l">lease + watermark</text>
+  <path class="ln" d="M515,226 L372,318" marker-end="url(#a)"/>
+  <rect x="394" y="249" width="77" height="18" fill="#ffffff" opacity="0.92"/>
+  <text x="398" y="262" class="l">Query slot</text>
+  <path class="ln" d="M515,272 L372,446" marker-end="url(#a)"/>
+  <path class="ln" d="M865,192 L998,192" marker-end="url(#a)"/>
+  <rect x="868" y="169" width="118" height="18" fill="#ffffff" opacity="0.92"/>
+  <text x="872" y="182" class="l">SendMessageBatch</text>
+  <!-- Queue arrows -->
+  <path class="ln" d="M1040,262 L867,392" marker-end="url(#a)"/>
+  <rect x="868" y="317" width="56" height="18" fill="#ffffff" opacity="0.92"/>
+  <text x="872" y="330" class="l">Receive</text>
+  <path class="ln" d="M1160,262 L1160,288" marker-end="url(#a)"/>
+  <rect x="1166" y="267" width="139" height="18" fill="#ffffff" opacity="0.92"/>
+  <text x="1170" y="280" class="l">maxReceiveCount = 6</text>
+  <!-- Worker arrows -->
+  <path class="ln" d="M515,372 L372,372" marker-end="url(#a)"/>
+  <rect x="448" y="353" width="56" height="18" fill="#ffffff" opacity="0.92"/>
+  <text x="452" y="366" class="l">GetItem</text>
+  <path class="ln" d="M515,480 L372,490" marker-end="url(#a)"/>
+  <path class="ln" d="M865,470 L1358,470" marker-end="url(#a)"/>
+  <rect x="1006" y="447" width="221" height="18" fill="#ffffff" opacity="0.92"/>
+  <text x="1010" y="460" class="l">HTTPS + SigV4 · Idempotency-Key</text>
+  <rect x="1006" y="479" width="284" height="18" fill="#ffffff" opacity="0.92"/>
+  <text x="1010" y="492" class="l">(VPC endpoint execute-api, timeout 25 s)</text>
+  <path class="ln" d="M865,520 L998,580" marker-end="url(#a)"/>
+  <rect x="868" y="535" width="62" height="18" fill="#ffffff" opacity="0.92"/>
+  <text x="872" y="548" class="l">&gt; 350 KB</text>
+  <!-- Reconciler arrows -->
+  <path class="ln" d="M515,640 L372,545" marker-end="url(#a)"/>
+  <rect x="432" y="605" width="63" height="18" fill="#ffffff" opacity="0.92"/>
+  <text x="436" y="618" class="l">BatchGet</text>
+  <path class="ln" d="M865,640 L998,615" marker-end="url(#a)"/>
+  <rect x="868" y="655" width="56" height="18" fill="#ffffff" opacity="0.92"/>
+  <text x="872" y="668" class="l">reporte</text>
+  <path class="lnr" d="M865,700 L960,700 L960,250 L998,250" marker-end="url(#ar)"/>
+  <rect x="964" y="637" width="83" height="18" fill="#ffffff" opacity="0.92"/>
+  <text x="968" y="650" class="lr">re-despacho</text>
+  <rect x="964" y="653" width="83" height="18" fill="#ffffff" opacity="0.92"/>
+  <text x="968" y="666" class="lr">idempotente</text>
+  <path class="ln" d="M690,818 L690,732" marker-end="url(#a)"/>
+  <rect x="374" y="395" width="111" height="18" fill="#ffffff" opacity="0.92"/>
+  <text x="378" y="408" class="l">PutItem PENDING</text>
+  <rect x="374" y="463" width="132" height="18" fill="#ffffff" opacity="0.92"/>
+  <text x="378" y="476" class="l">Acquire / Complete</text>
+
+  <!-- Legend -->
+  <line x1="40" y1="920" x2="80" y2="920" class="ln"/>
+  <text x="90" y="924" class="l">flujo principal</text>
+  <line x1="210" y1="920" x2="250" y2="920" class="lnr"/>
+  <text x="260" y="924" class="lr">recuperación (reconciliación)</text>
+  <text x="1000" y="924" class="l">Detalle de cada decisión: docs/architecture.md (ADR-001 a ADR-007)</text>
+<metadata><c2pa:manifest>AAAWgmp1bWIAAAAeanVtZGMycGEAEQAQgAAAqgA4m3EDYzJwYQAAABZcanVtYgAAAEdqdW1kYzJtYQARABCAAACqADibcQN1cm46YzJwYToyY2QwYTE1Ni1jMzgyLTRlNDItYTY1Yi0zZjU0MzFlOTlmMGEAAAADl2p1bWIAAAApanVtZGMyYXMAEQAQgAAAqgA4m3EDYzJwYS5hc3NlcnRpb25zAAAAALxqdW1iAAAARGp1bWRjYm9yABEAEIAAAKoAOJtxE2MycGEuaW5ncmVkaWVudC52MwAAAAAYYzJzaLQ0zTkh0JM9lWOTK5/KYoUAAABwY2JvcqNpZGM6Zm9ybWF0bWltYWdlL3N2Zyt4bWxqaW5zdGFuY2VJRHgseG1wOmlpZDphNTcxYmI2Yi0wOGZmLTQwYTEtOTZkNS1lMjFmNWQ2M2Y1MzZscmVsYXRpb25zaGlwaHBhcmVudE9mAAAB4mp1bWIAAABBanVtZGNib3IAEQAQgAAAqgA4m3ETYzJwYS5hY3Rpb25zLnYyAAAAABhjMnNoAiWMP95wwzVHxbf9cp6NHQAAAZljYm9yomdhY3Rpb25zgqJmYWN0aW9ua2MycGEub3BlbmVkanBhcmFtZXRlcnOha2luZ3JlZGllbnRzgaJjdXJseC1zZWxmI2p1bWJmPWMycGEuYXNzZXJ0aW9ucy9jMnBhLmluZ3JlZGllbnQudjNkaGFzaFggZ6FZDhRiShujm3nufVy3zGUch0AMyEtpVF0Wzu9x2BWkZmFjdGlvbngdY29tLmFudGhyb3BpYy5jbGF1ZGUucHJvdmlkZWRqcGFyYW1ldGVyc6F4H2NvbS5hbnRocm9waWMub3JpZ2luLWNvbmZpZGVuY2VndW5rbm93bmtkZXNjcmlwdGlvbnhmQ2xhdWRlIHByb3ZpZGVkIHRoaXMgZmlsZSBhdCB0aGUgcmVxdWVzdCBvZiBhIHVzZXIgYW5kIG1heSBoYXZlIGNyZWF0ZWQgb3IgbW9kaWZpZWQgdGhlIGZpbGUgY29udGVudHMubXNvZnR3YXJlQWdlbnShZG5hbWVmQ2xhdWRlcmFsbEFjdGlvbnNJbmNsdWRlZPUAAADIanVtYgAAAEBqdW1kY2JvcgARABCAAACqADibcRNjMnBhLmhhc2guZGF0YQAAAAAYYzJzaCDvNs9baUCQXghUsevNk/AAAACAY2JvcqVjYWxnZnNoYTI1NmNwYWRMAAAAAAAAAAAAAAAAZGhhc2hYIEDJGZc+AqvcG2SCDeJyMXOJRmIkHBHCpoNdpO+W3WFQZG5hbWVuanVtYmYgbWFuaWZlc3RqZXhjbHVzaW9uc4GiZXN0YXJ0GS0ZZmxlbmd0aBkeBAAAAj5qdW1iAAAAJ2p1bWRjMmNsABEAEIAAAKoAOJtxA2MycGEuY2xhaW0udjIAAAACD2Nib3KlY2FsZ2ZzaGEyNTZpc2lnbmF0dXJleE1zZWxmI2p1bWJmPS9jMnBhL3VybjpjMnBhOjJjZDBhMTU2LWMzODItNGU0Mi1hNjViLTNmNTQzMWU5OWYwYS9jMnBhLnNpZ25hdHVyZWppbnN0YW5jZUlEeCx4bXA6aWlkOjUyOTBkMDFlLTE5NzAtNDI2MC05ZDllLTk5ZWY4OTZmYjViM3JjcmVhdGVkX2Fzc2VydGlvbnODomN1cmx4LXNlbGYjanVtYmY9YzJwYS5hc3NlcnRpb25zL2MycGEuaW5ncmVkaWVudC52M2RoYXNoWCBnoVkOFGJKG6Obee59XLfMZRyHQAzIS2lUXRbO73HYFaJjdXJseCpzZWxmI2p1bWJmPWMycGEuYXNzZXJ0aW9ucy9jMnBhLmFjdGlvbnMudjJkaGFzaFggPHf1ZRFrQMugVqe1szPoxN4D+E7ZO0ODsMzwcv2W1miiY3VybHgpc2VsZiNqdW1iZj1jMnBhLmFzc2VydGlvbnMvYzJwYS5oYXNoLmRhdGFkaGFzaFggI7fh3DqPOcBHAatJQxzD/WvGVKUUWLljYFFRITTZ5Vl0Y2xhaW1fZ2VuZXJhdG9yX2luZm+jZG5hbWVvQW50aHJvcGljIEZpbGVzZ3ZlcnNpb25lMS4wLjBrc3BlY1ZlcnNpb25lMi40LjAAABA4anVtYgAAAChqdW1kYzJjcwARABCAAACqADibcQNjMnBhLnNpZ25hdHVyZQAAABAIY2JvctKEWQISogEmGCFZAgowggIGMIIBjaADAgECAhRA5aAK7sI50L64g/oGQgU9Z1UTADAKBggqhkjOPQQDAzBJMRcwFQYDVQQKEw5BbnRocm9waWMsIFBCQzEuMCwGA1UEAxMlQW50aHJvcGljIENvbnRlbnQgQ3JlZGVudGlhbHMgUm9vdCBDQTAeFw0yNjA4MDcxODQzNTZaFw0yODA4MDYxOTQzNTZaMEQxFzAVBgNVBAoTDkFudGhyb3BpYywgUEJDMSkwJwYDVQQDEyBBbnRocm9waWMgQ2xhdWRlIENvbnRlbnQgU2lnbmluZzBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABJh6CmvLUBgFFNU0vUKlOVtE6djd17L5SuwX0LemFisBM3dkd/3cyjxFA3Qo5S46fX0/ihY0VZ7mfb9KF703t5OjWDBWMA4GA1UdDwEB/wQEAwIHgDAVBgNVHSUEDjAMBgorBgEEAYPoXgIBMAwGA1UdEwEB/wQCMAAwHwYDVR0jBBgwFoAUzlHiBIFOZFsj+OPEz5o+nMHXXMIwCgYIKoZIzj0EAwMDZwAwZAIwMXMdFJ4BetLLVY7ORuE9noqbbAZOZn/aArXyTwFAZfKrPzxF2vPoJNf1+UCdg1XGAjBwX1zd9WGqYkqmL5SFqw1QySjr1zJfpJM9+1rdDwSPLMOPOjKuiXjoU/pUUeG9RwmhY3BhZFkNngAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPZYQET0GmTJ8z3VSM9BmLYOD7XCP1LfUeD7XvbAn93ZBj89wErtW1W/87WN3jwqQrP/21rZhrM9vuFNeHtCEURvZJ4=</c2pa:manifest></metadata></svg>

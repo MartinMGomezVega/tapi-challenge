@@ -1,6 +1,6 @@
 # Evidencia de Observabilidad y Dashboard Operativo (`005-T021`)
 
-**Módulo Terraform**: [deploy/terraform/modules/observability/main.tf](file:///Users/martingomezvega/challenge/tapi-challenge/deploy/terraform/modules/observability/main.tf)
+**Módulo Terraform**: [deploy/terraform/modules/observability/main.tf](../../deploy/terraform/modules/observability/main.tf)
 **Namespace EMF**: `Tapi/ScheduledQueries`
 
 ## 1. Contrato de telemetría verificado por Golden Tests
@@ -21,10 +21,10 @@
 ## 3. Cobertura de alarmas y runbooks (7/7)
 | Alarma Terraform | Severidad | Runbook |
 |---|---|---|
-| `*-dispatch-lag-high` | P1 | [dispatch-lag.md](file:///Users/martingomezvega/challenge/tapi-challenge/docs/runbooks/dispatch-lag.md) |
-| `*-queue-age-high` | P2 | [queue-age.md](file:///Users/martingomezvega/challenge/tapi-challenge/docs/runbooks/queue-age.md) |
-| `*-dlq-messages-visible` | P2 | [dlq.md](file:///Users/martingomezvega/challenge/tapi-challenge/docs/runbooks/dlq.md) |
-| `*-daily-coverage-low` | P1 | [coverage-low.md](file:///Users/martingomezvega/challenge/tapi-challenge/docs/runbooks/coverage-low.md) |
-| `*-auth-errors` | P1 | [auth-errors.md](file:///Users/martingomezvega/challenge/tapi-challenge/docs/runbooks/auth-errors.md) |
-| `*-lambda-quota-pressure` | P1 | [lambda-quota.md](file:///Users/martingomezvega/challenge/tapi-challenge/docs/runbooks/lambda-quota.md) |
-| `*-provider-over-capacity` | P2 | [provider-capacity.md](file:///Users/martingomezvega/challenge/tapi-challenge/docs/runbooks/provider-capacity.md) |
+| `*-dispatch-lag-high` | P1 | [dispatch-lag.md](../runbooks/dispatch-lag.md) |
+| `*-queue-age-high` | P2 | [queue-age.md](../runbooks/queue-age.md) |
+| `*-dlq-messages-visible` | P2 | [dlq.md](../runbooks/dlq.md) |
+| `*-daily-coverage-low` | P1 | [coverage-low.md](../runbooks/coverage-low.md) |
+| `*-auth-errors` | P1 | [auth-errors.md](../runbooks/auth-errors.md) |
+| `*-lambda-quota-pressure` | P1 | [lambda-quota.md](../runbooks/lambda-quota.md) |
+| `*-provider-over-capacity` | P2 | [provider-capacity.md](../runbooks/provider-capacity.md) |

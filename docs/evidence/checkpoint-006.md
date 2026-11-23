@@ -17,10 +17,10 @@
   - `.github/workflows/{ci,cd,nightly}.yml` (OIDC sin access keys, gates de Go + LocalStack + Trivy + Terraform + Checkov + drift detection).
   - `.github/CODEOWNERS`, `.github/pull_request_template.md`, `.commitlintrc.json`.
 - **Fase 5 — Documentación del challenge (`006-T022`..`T025`)**:
-  - [docs/architecture-diagram.svg](file:///Users/martingomezvega/challenge/tapi-challenge/docs/architecture-diagram.svg)
-  - [docs/costs.md](file:///Users/martingomezvega/challenge/tapi-challenge/docs/costs.md) (estimación mensual 1M / 10M / 100M)
-  - [docs/failure-modes.md](file:///Users/martingomezvega/challenge/tapi-challenge/docs/failure-modes.md) (FMEA completo)
-  - [docs/evidence/final-report.md](file:///Users/martingomezvega/challenge/tapi-challenge/docs/evidence/final-report.md) (trazabilidad integral)
+  - [docs/architecture-diagram.svg](../architecture-diagram.svg)
+  - [docs/costs.md](../costs.md) (estimación mensual 1M / 10M / 100M)
+  - [docs/failure-modes.md](../failure-modes.md) (FMEA completo)
+  - [docs/evidence/final-report.md](final-report.md) (trazabilidad integral)
 
 ## 2. Evidencia de gates (sin efectos externos — Regla E)
 - `actionlint` sobre `.github/workflows/{ci,cd,nightly}.yml`: **0 issues**

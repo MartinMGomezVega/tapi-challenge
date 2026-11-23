@@ -16,6 +16,10 @@
 
 ## 2. Diagrama
 
+![Arquitectura](architecture-diagram.png)
+
+Versión editable: [architecture-diagram.svg](architecture-diagram.svg)
+
 ```mermaid
 flowchart LR
     subgraph VPC["VPC privada — 1 región, 3 AZ, sin NAT"]
